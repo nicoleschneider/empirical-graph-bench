@@ -1,0 +1,3 @@
+[submodule "vendor/HARD-graph-benchmark"]
+	path = vendor/HARD-graph-benchmark
+	url = https://github.com/nicoleschneider/HARD-graph-benchmark.git

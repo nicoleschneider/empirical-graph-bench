@@ -1,0 +1,12 @@
+id: louvain-networkx
+name: NetworkX Louvain
+algorithm: louvain
+library: networkx
+backend: networkx
+requires: []
+variants:
+  - representation: networkx-text
+    driver: gaib-runner
+    gaib_task: NX_LOUVAIN
+    definition_task: NX_LOUVAIN
+    gpu: false

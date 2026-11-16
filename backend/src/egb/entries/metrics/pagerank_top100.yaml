@@ -1,0 +1,7 @@
+id: pagerank_top100
+name: Top-100 overlap
+unit: ""
+better: higher
+columns: [pagerank_top100]
+tasks: [centrality]
+requires_ground_truth: false

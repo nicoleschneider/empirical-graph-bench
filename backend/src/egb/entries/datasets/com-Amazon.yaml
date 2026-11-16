@@ -1,0 +1,11 @@
+id: com-Amazon
+name: com-Amazon
+directory: Com-Amazon
+directed: false
+vertices: 334863
+edges: 925872
+graph:
+  file: com-amazon.ungraph.txt
+  raw_file: com-amazon.ungraph.txt.gz
+  url: https://snap.stanford.edu/data/bigdata/communities/com-amazon.ungraph.txt.gz
+  sha256: bb4b9fcf549c9174049e885e9a0a4057c9724846e7297c4a1ea299b8e92eec34

@@ -1,0 +1,7 @@
+id: pagerank_l1
+name: L1 to reference
+unit: ""
+better: lower
+columns: [pagerank_l1]
+tasks: [centrality]
+requires_ground_truth: false

@@ -1,0 +1,7 @@
+id: processing_s
+name: Processing time
+unit: "s"
+better: lower
+columns: [processing_s]
+tasks: [community-detection, centrality]
+requires_ground_truth: false

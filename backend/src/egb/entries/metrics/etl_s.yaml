@@ -1,0 +1,7 @@
+id: etl_s
+name: ETL time
+unit: "s"
+better: lower
+columns: [etl_s]
+tasks: [community-detection, centrality]
+requires_ground_truth: false

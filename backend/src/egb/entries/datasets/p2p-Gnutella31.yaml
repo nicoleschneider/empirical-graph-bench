@@ -1,0 +1,11 @@
+id: p2p-Gnutella31
+name: p2p-Gnutella31
+directory: P2P-Gnutella31
+directed: true
+vertices: 62586
+edges: 147892
+graph:
+  file: p2p-Gnutella31.txt
+  raw_file: p2p-Gnutella31.txt.gz
+  url: https://snap.stanford.edu/data/p2p-Gnutella31.txt.gz
+  sha256: 20cf3b0642718e7628c7aa15a41b21e663aea872946878d5b9abc80ee360f869

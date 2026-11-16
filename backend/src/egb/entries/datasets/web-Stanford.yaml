@@ -1,0 +1,11 @@
+id: web-Stanford
+name: web-Stanford
+directory: Web-Stanford
+directed: true
+vertices: 281903
+edges: 1992636
+graph:
+  file: web-Stanford.txt
+  raw_file: web-Stanford.txt.gz
+  url: https://snap.stanford.edu/data/web-Stanford.txt.gz
+  sha256: 49bfc0e366c3028dbd84e8557b09287cbd61051bde29d160c277688c727cb679

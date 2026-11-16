@@ -1,0 +1,11 @@
+id: wiki-topcats
+name: wiki-topcats
+directory: Wiki-Topcats
+directed: true
+vertices: 1791489
+edges: 25447873
+graph:
+  file: wiki-topcats.txt
+  raw_file: wiki-topcats.txt.gz
+  url: https://snap.stanford.edu/data/wiki-topcats.txt.gz
+  sha256: b1b80cbad72f4518af8150c71f77aecfa6a7b1692d207d1f3ca4d942b4d2e590

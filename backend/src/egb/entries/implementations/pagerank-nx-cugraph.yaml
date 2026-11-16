@@ -1,0 +1,20 @@
+id: pagerank-nx-cugraph
+name: nx-cugraph PageRank
+algorithm: pagerank
+library: networkx
+backend: cugraph
+requires: [cuda]
+variants:
+  - representation: networkx-text
+    driver: gaib-runner
+    gaib_task: NX_PAGERANK_GPU
+    definition_task: NX_PAGERANK
+    gpu: true
+  - representation: cudf-float32
+    driver: gaib-representation-test
+    gaib_task: NX_PAGERANK_GPU_CUDF
+    script_task: pagerank
+  - representation: cudf-float64
+    driver: gaib-representation-test
+    gaib_task: NX_PAGERANK_GPU_CUDF_F64
+    script_task: pagerank

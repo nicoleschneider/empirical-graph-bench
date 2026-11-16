@@ -1,0 +1,5 @@
+id: networkx-text
+name: NetworkX loading
+loader: Experiment.etl, nx.read_edgelist
+precision: float64
+requires: []

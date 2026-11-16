@@ -1,0 +1,8 @@
+id: louvain
+name: Louvain
+task: community-detection
+orientation: undirected
+parameters:
+  weight: null
+  resolution: 1
+  threshold: 1.0e-7

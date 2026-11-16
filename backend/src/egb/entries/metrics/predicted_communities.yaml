@@ -1,0 +1,7 @@
+id: predicted_communities
+name: Communities
+unit: "communities"
+better: none
+columns: [predicted_communities]
+tasks: [community-detection]
+requires_ground_truth: false

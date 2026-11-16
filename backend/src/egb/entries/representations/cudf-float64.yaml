@@ -1,0 +1,5 @@
+id: cudf-float64
+name: cudf loading, float64
+loader: cudf.read_csv, nxcg.from_pandas_edgelist, float64 weight column
+precision: float64
+requires: [cuda, cudf]

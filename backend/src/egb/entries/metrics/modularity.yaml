@@ -1,0 +1,7 @@
+id: modularity
+name: Modularity
+unit: ""
+better: higher
+columns: [modularity]
+tasks: [community-detection]
+requires_ground_truth: false

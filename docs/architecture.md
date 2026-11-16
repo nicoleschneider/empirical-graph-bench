@@ -55,34 +55,38 @@ The app calls it and does not reimplement the timed path.
 | `pip install git+...@commit` | yes | yes, a `pyproject.toml` | yes |
 | Copy the modules in | yes | no | drifts on the first edit |
 
-### Recommendation: submodule, run in a separate benchmark environment
+### Decision: submodule, run in a separate benchmark environment
 
-1. Add HARD-graph-benchmark as a submodule at `vendor/HARD-graph-benchmark`,
+1. HARD-graph-benchmark is a submodule at `vendor/HARD-graph-benchmark`,
    pinned to `dbb9903` (main, 2026-10-25). The URL is the fork,
    `https://github.com/nicoleschneider/HARD-graph-benchmark.git`, never
    `osullik/umd_thesis`.
-2. Do not install it. A worker process runs with `PYTHONPATH` set to
-   `vendor/HARD-graph-benchmark/gaib` and its working directory set to a
-   per-job scratch folder. gaib's relative paths then land inside that
-   folder, and an `exit()` ends the worker, not the server.
-3. The worker runs in a benchmark environment built from gaib's own lock
-   file for that hardware, not in the backend's environment. This is the
-   environment the paper's numbers came from.
-4. The worker calls gaib exactly as its command lines do:
+2. It is not installed. The LocalRunner runs gaib's own scripts as
+   subprocesses, with the working directory set to a per-job scratch folder
+   (`jobs/<job_id>/work/cwd`). gaib's relative paths then land inside that
+   folder, and an `exit()` ends the subprocess, not the server.
+3. The scripts run in a benchmark environment built from gaib's own lock
+   file, not in the backend's environment. `egb setup-bench` builds it with
+   uv: Python 3.11.9 and `requirements-lock-cpu.txt`. On the Mac its package
+   list is identical to the paper's Mac freeze.
+4. The runner calls gaib through its command lines, with no app code in
+   between:
    - NetworkX loading: write gaib definition JSONs into the job folder, then
-     `Runner(...).run_all_experiments(definitions, repetitions, base_seed)`.
-     This keeps gaib's warm-up on the karate club graph, its run order, the
-     seed rule (base seed + run index), its timing points and its scoring.
-   - cudf loading: run `iterations/representation_test.py` as a script with
-     its flags (`--task`, `--dtype`, `--undirected`, `--repetitions`,
-     `--base-seed`, `--results-csv`, `--hardware`, `--manifest`,
-     `--pagerank-reference-directory`). This keeps its 3-node warm-up, its
-     `cp.cuda.Device().synchronize()` calls and its cross-path validity CSVs.
-5. The backend imports gaib only for constants and scoring it reuses outside
-   the timed path: `runner.RESULTS_COLUMNS`, `Task.PAGERANK_ALPHA` and
-   `experiment.Evaluator`. For that it pins gaib's import dependencies at the
-   lock file versions (networkx 3.2.1, scikit-learn 1.9.1, tqdm 4.66.2,
-   numpy 2.4.6, pandas 3.0.6).
+     run `runner.py --hardware --definitions --output-directory
+     --results-csv --repetitions --base-seed --pagerank-reference-directory`.
+     Its `__main__` block calls `Runner.run_all_experiments`, which keeps
+     gaib's warm-up on the karate club graph, its run order, the seed rule
+     (base seed + run index), its timing points and its scoring.
+   - cudf loading: run `iterations/representation_test.py` with
+     `PYTHONPATH` set to `gaib/` and its flags (`--task`, `--dtype`,
+     `--undirected`, `--repetitions`, `--base-seed`, `--results-csv`,
+     `--hardware`, `--manifest`, `--pagerank-reference-directory`). This keeps
+     its 3-node warm-up, its `cp.cuda.Device().synchronize()` calls and its
+     cross-path validity CSVs.
+   - Dataset downloads: run `download_datasets.py` with a datasets list
+     written from the registry.
+5. The backend does not import gaib. It reads gaib's CSVs as written, so it
+   needs none of gaib's dependencies.
 6. The environment snapshot of every job records the submodule commit, a
    dirty flag for the submodule tree, and the hash of the lock file used.
 
@@ -98,11 +102,13 @@ step, and sessions record which commit produced each result.
 
 ### Equivalence check
 
-A test runs one small definition (email-Eu-core, `NX_LOUVAIN`, 3 runs) two
-ways: through the app's LocalRunner and through `python runner.py` directly,
-in the same environment. Every non-timing column must be equal (seed,
-vertices, edges, communities, NMI, modularity). Timing columns must have the
-same set of keys and comparable medians.
+`backend/tests/test_e2e.py` runs email-Eu-core with Louvain and PageRank, 2
+repetitions, seeds 123 and 124, through the API. It then reruns the same
+definitions with `runner.py` directly and compares every non-timing column.
+It also compares them with the paper's Mac rows in
+`gaib/results/mac_m5max_20261019/results_cpu.csv`. Seed, vertices, edges,
+communities, NMI (0.5894387968016631 at seed 123), modularity and top-100
+overlap match exactly. PageRank L1 matches to a relative 1e-12; see below.
 
 ### Measurement definitions inherited from gaib
 
@@ -119,27 +125,31 @@ These come from gaib and its analysis notebook. The app uses them unchanged.
   95% bootstrap interval (10,000 resamples, seed 123).
 - A run is flagged by the sleep check if its unaccounted wall-clock gap
   exceeds both 10 s and 10% of its accounted time.
+- `pagerank_l1` is not bit-reproducible across processes. gaib sums over a
+  set union of vertex ids, whose order follows Python's per-process string
+  hashing. The same scores give 0.004905715876046686 to
+  0.004905715876046691 on email-Eu-core across `PYTHONHASHSEED` values.
 
 ## 2. Components
 
 ```
 frontend/  React + TypeScript (Vite). Renders steps, forms and tables from API data.
 backend/   FastAPI. Registry, sessions, job queue, analysis, suggesters.
-  worker   Runs inside the benchmark environment. Calls gaib. Stdlib only.
 vendor/HARD-graph-benchmark   gaib, pinned submodule.
-data/      Shared datasets (gaib layout and manifest) and PageRank reference cache.
+data/      Benchmark environment, datasets (gaib layout and manifest),
+           PageRank reference cache, download jobs, run lock.
 sessions/  One folder per session.
 ```
 
-The backend never runs a benchmark in its own process. The worker never
-talks to the API; it writes files and the backend reads them.
+The backend never runs a benchmark in its own process. gaib's scripts never
+talk to the API; they write files and the backend reads them.
 
 ## 3. Registry
 
 Every extensible concept is a registry entry: a YAML file validated by a
-Pydantic model. Built-in entries live in `backend/registry/<kind>/`. A
-configurable extra directory holds a user's own entries, with the same
-layout. The UI lists, filters and renders entries from the API. Adding an
+Pydantic model. Built-in entries live in `backend/src/egb/entries/<kind>/`,
+one file per entry, named by its id. `--extra-entries` adds directories with
+the same layout; a duplicate id is an error. The UI lists, filters and renders entries from the API. Adding an
 entry needs no frontend change.
 
 Entries that need code (a driver, a metric formula, a suggestion rule) name
@@ -147,23 +157,25 @@ it by import path, for example `egb.metrics.ratio_of_medians`. Entries that
 take parameters declare them as JSON Schema; the frontend renders a form
 from the schema.
 
-The backend checks compatibility, not the UI. `POST /api/configurations/validate`
-answers whether an algorithm, implementation, representation, dataset and
-hardware combination can run, and if not, why.
+The backend checks compatibility, not the UI. `GET /api/configurations`
+lists every implementation and representation pair with whether it can run
+on the local machine, and if not, why ("Needs cuda. No NVIDIA GPU found.").
 
 ### Kinds
 
 | Kind | Declares | Paper entries |
 |---|---|---|
-| `task` | Problem being solved, its output type, metrics that apply | `community-detection`, `node-ranking` |
+| `task` | Problem being solved, its output type, metrics that apply | `community-detection`, `centrality` |
 | `algorithm` | Task, parameters, required graph orientation | `louvain`, `label-propagation`, `pagerank` |
 | `implementation` | Algorithm, library, backend, hardware requirements, driver | `networkx`, `nx-cugraph` per algorithm |
 | `representation` | Loading path, in-memory structure, precision, where graph construction is timed | `networkx-text`, `cudf-float32`, `cudf-float64` |
 | `dataset` | Files, hashes, size, orientation, ground truth, source URL | the five SNAP graphs |
 | `metric` | Column or formula, unit, direction, aggregation, applicable tasks | see below |
-| `hardware` | Label, runner, benchmark environment, detected specs, capabilities | the local machine |
-| `runner` | Runner class and its settings schema | `local`, later `ssh`, `slurm` |
-| `suggester` | Suggester class and its settings | `rules`, later `agent` |
+| `runner` | Runner class and its settings schema (later) | `local`, later `ssh`, `slurm` |
+| `suggester` | Suggester class and its settings (later) | `rules`, later `agent` |
+
+Hardware is not a registry entry. The local machine is detected at startup
+(see Hardware below); remote machines will be detected the same way.
 
 A configuration, the unit that gets a chart color, is the tuple
 (hardware, implementation, representation). An algorithm is part of the
@@ -178,7 +190,7 @@ Tasks and algorithms:
 |---|---|---|---|
 | community-detection | louvain | `weight=None, resolution=1, threshold=1e-7, seed` | undirected |
 | community-detection | label-propagation | `asyn_lpa_communities(weight=None, seed)` | undirected |
-| node-ranking | pagerank | `alpha=0.85` (`Task.PAGERANK_ALPHA`) | dataset's own |
+| centrality | pagerank | `alpha=0.85` (`Task.PAGERANK_ALPHA`) | dataset's own |
 
 Representations:
 
@@ -208,8 +220,13 @@ Implementation and representation to gaib driver and `task` value:
 Datasets come from gaib's `datasets/manifest.json` and `snap_datasets.json`:
 email-Eu-core (with department ground truth), wiki-topcats, web-Stanford,
 com-Amazon (undirected) and p2p-Gnutella31. The registry stores URL,
-SHA-256, vertex and edge counts, orientation and ground-truth file. A user
-dataset entry is a local file path plus its hash, computed at registration.
+the downloaded archive's name and SHA-256 (as in gaib's manifest), the
+extracted file name, vertex and edge counts, orientation and ground-truth
+file. A dataset counts as verified when the extracted file exists and its
+archive matches the hash. Hashes are computed once per file version and
+cached; while a job runs, an uncached file shows as unverified instead of
+being hashed. Downloads run gaib's `download_datasets.py` through the run
+queue, so they never overlap a timed run.
 
 Metrics:
 
@@ -224,8 +241,8 @@ Metrics:
 | `nmi` | column, needs ground truth | none | higher | community-detection |
 | `predicted_communities` | column | count | none | community-detection |
 | `nmi_between_paths` | `cross_path_louvain.csv` | none | higher | validity check |
-| `pagerank_l1` | column, against the reference | none | lower | node-ranking |
-| `pagerank_top100` | column | fraction | higher | node-ranking |
+| `pagerank_l1` | column, against the reference | none | lower | centrality |
+| `pagerank_top100` | column | fraction | higher | centrality |
 | `l1_vs_original_path` | `cross_path_l1.csv` | none | lower | validity check |
 | `unaccounted_s` | sleep check | s | lower | run validity |
 
@@ -239,10 +256,14 @@ The first version has one hardware entry: the machine the backend runs on.
 Nothing about it is assumed from the gaib work. On startup the backend
 detects its specs (chip or CPU model, core counts, memory, OS and version,
 GPUs with driver and CUDA version when `nvidia-smi` exists) and derives its
-capabilities from them: `cpu` always, `cuda` and `cudf` only when a CUDA GPU
-and the cudf packages are present. The hardware label written to the
-results CSV defaults to a slug built from the detected model, chip and
-memory, and the practitioner can rename it. On the Mac this machine is
+capabilities from them: `cpu` when the benchmark environment exists;
+`cuda` when `nvidia-smi` lists a GPU and the benchmark environment can import
+nx-cugraph and see a device; `cudf` when it can also run a cudf operation.
+The checks run in the benchmark environment, because that is where gaib
+runs. The hardware label written to the results CSV defaults to a slug of
+the detected CPU and memory (`apple-m5-max-48gb` on the Mac), and the
+practitioner can rename it with `PATCH /api/hardware/local`; the name is
+kept in `data/hardware.json`. On the Mac this machine is
 CPU-only, so the `nx-cugraph` implementations and both cudf
 representations show as unavailable, with the missing capability as the
 reason.
@@ -266,38 +287,47 @@ Paper configurations runnable on a CPU-only machine:
 class Runner(Protocol):
     id: str
 
-    def describe(self) -> RunnerInfo: ...
-    def capabilities(self, hardware: HardwareEntry) -> set[str]: ...
-    async def snapshot(self, hardware: HardwareEntry) -> EnvironmentSnapshot: ...
-    async def start(self, job: JobSpec, job_dir: Path) -> None: ...
-    def events(self, job_id: str) -> AsyncIterator[JobEvent]: ...
-    async def cancel(self, job_id: str) -> None: ...
+    async def run(self, handle: JobHandle) -> None: ...
+    async def cancel(self, handle: JobHandle) -> None: ...
 ```
 
-- `JobSpec` is fully resolved before it reaches a runner: driver, gaib
-  definitions or script flags, dataset paths, repetitions, base seed,
-  hardware label, benchmark environment. A runner does not consult the
-  registry.
-- `JobEvent` is one of `started`, `warm_up`, `run_completed` (with the new
-  results row), `log` (a stdout line), `finished`, `failed` (exit code and
-  last log lines), `cancelled`.
-- A runner writes the job folder described in section 6 and nothing outside
-  it.
+A `JobQueue` owns the queue and hands one `JobHandle` at a time to its
+runner. The handle carries the `JobSpec`, the job folder, the event list and
+a callback that appends status records to `jobs.jsonl`.
 
-**LocalRunner.** Starts the worker with the hardware entry's interpreter,
-`PYTHONPATH` set to gaib, and the working directory set to
-`jobs/<job_id>/work/cwd`. It emits `run_completed` by watching the results
-CSV, which gaib appends to and fsyncs once per run. It parses stdout only
-for `log` events. Cancelling sends SIGTERM to the process group; partial
-rows stay and the job is marked cancelled.
+- `JobSpec` is fully resolved before it reaches a runner: the gaib
+  invocations (argv, working directory, extra environment variables,
+  results CSV), the job items mapping each gaib `task` and dataset name to
+  a configuration, repetitions, base seed and hardware label. A runner does
+  not consult the registry beyond verifying dataset hashes.
+- Job kinds: `exploratory` (step 2), `targeted` (step 5, names a
+  hypothesis), `download`.
+- `JobEvent` types: `queued`, `started`, `environment` (snapshot hash),
+  `run_completed` (configuration and the new results row), `finished`,
+  `failed` (reason and the last 20 lines of `stdout.log`), `cancelled`.
+  Status events also go to `jobs.jsonl`.
+- A runner writes the job folder described in section 6 and the shared
+  data directory, nothing else.
+
+**LocalRunner.** Before the first invocation it verifies every dataset's
+hash and takes the environment snapshot. Then it runs each invocation with
+the benchmark interpreter, in `jobs/<job_id>/work/cwd`, with stdout and
+stderr going to `stdout.log`, as on the cluster. It does not read stdout
+while a job runs and sets no `PYTHONUNBUFFERED`, so output buffering matches
+a paper run. Progress comes from the results CSV, which gaib appends to and
+fsyncs once per run: the runner checks it once per `--poll-seconds`
+(default 1 s) and emits `run_completed` for each new row. A row that maps
+to no configuration logs a warning. On success the `work/` folder is
+deleted. Cancelling sends SIGTERM to the process group; partial rows stay
+and the job is marked cancelled.
 
 **RemoteRunner (later).** Same interface. The SSH variant copies the job
-folder to a remote scratch directory, runs the same worker in a remote
-benchmark environment built from the same lock file, streams stdout, and
-copies the job folder back. The Slurm variant submits the worker with
-`sbatch`, as `gaib/hard-bench.sh` does, polls `squeue` and `sacct`, and
-copies back on completion. Neither needs a UI change: hardware entries name
-their runner, and the UI shows jobs, events and results the same way.
+folder to a remote scratch directory, runs the same gaib scripts in a remote
+benchmark environment built from the same lock file, and copies the job
+folder back. The Slurm variant submits them with `sbatch`, as
+`gaib/hard-bench.sh` does, polls `squeue` and `sacct`, and copies back on
+completion. Neither needs a UI change: the UI shows jobs, events and
+results the same way.
 
 ## 5. Hypothesis suggester interface
 
@@ -377,9 +407,10 @@ sessions/<session_id>/
     <snapshot_hash>.json  one file per distinct environment
   jobs/<job_id>/
     spec.json             resolved JobSpec
-    command.json          interpreter, argv, working directory, environment variables set
+    command.jsonl         one line per invocation: argv, working directory, extra environment variables
+    environment.json      this job's environment snapshot
     definitions/*.json    gaib definitions, for gaib-runner jobs
-    results.csv           paper schema (runner.RESULTS_COLUMNS)
+    results.csv           paper schema (gaib's runner.RESULTS_COLUMNS)
     cross_path_l1.csv     representation-test PageRank jobs
     cross_path_louvain.csv  representation-test Louvain jobs
     reports/*.json        gaib's per-run JSON reports
@@ -388,8 +419,9 @@ sessions/<session_id>/
 ```
 
 Shared across sessions, under a data directory set by a CLI option:
-`datasets/` in gaib's layout with its `manifest.json`, and
-`pagerank_references/`. gaib keys the reference cache by dataset hash,
+`bench-env/`, `datasets/` in gaib's layout with its `manifest.json`,
+`pagerank_references/`, `downloads/<job_id>/` with `downloads/jobs.jsonl`,
+`hardware.json`, and the run lock `.egb.lock`. gaib keys the reference cache by dataset hash,
 orientation, alpha, tolerance and iteration limit, so sharing it is safe.
 
 ### Results
@@ -417,6 +449,7 @@ no endpoint to edit or delete an entry.
   "prediction": null,
   "source": "user",
   "suggestion": null,
+  "state_manifest": [["jobs/j-20261116-055702-6f3e/results.csv", "..."]],
   "state_hash": "sha256:...",
   "prev_entry_hash": "sha256:...",
   "entry_hash": "sha256:..."
@@ -435,22 +468,26 @@ no endpoint to edit or delete an entry.
   computed values.
 - `source` and `suggestion` record whether a suggester proposed the entry
   and how the practitioner edited it.
-- `state_hash` is SHA-256 over a sorted manifest of
-  `(relative path, SHA-256 of file)` for `config.json`, `config_history.jsonl`, every job's
-  `results.csv` and cross-path CSVs, and every environment
-  snapshot. It proves which results existed when the entry was recorded.
-  A prediction whose state hash does not cover the iteration's results was
-  recorded before them.
+- `state_manifest` lists `(relative path, SHA-256 of file)` for
+  `config.json`, `config_history.jsonl`, every environment snapshot, and the
+  `results.csv` and cross-path CSVs of every job that has ended. Files of a
+  job still running are left out, since they are still growing.
+  `state_hash` is the SHA-256 of the manifest. Together they prove which
+  results existed when the entry was recorded: a prediction whose manifest
+  does not list the iteration's results was recorded before them.
 - `prev_entry_hash` chains entries. `entry_hash` covers every other field.
-  `GET .../log/verify` recomputes the chain and the state hashes.
+  `GET .../log/verify` recomputes each entry hash, the chain and each state
+  hash, and checks that every job and environment file a manifest lists is
+  unchanged.
 - A targeted experiment (step 5) must name a recorded hypothesis with at
   least one prediction. The backend rejects it otherwise. Exploratory jobs
   (step 2) need none.
 
 ### Environment snapshot
 
-Taken by the worker at job start, inside the benchmark environment, so it
-describes what actually ran. Fields: hardware label, hostname, OS and
+Taken at job start, before any timed process. The Python, platform and
+package fields come from `egb/probe.py` run with the benchmark interpreter,
+so they describe what actually ran. Fields: hardware label, hostname, OS and
 version, CPU model and core counts, memory, GPU name, driver and CUDA
 version from `nvidia-smi` when present, Python version, the package freeze,
 the lock file name and hash, gaib's submodule commit and dirty flag, and
@@ -462,73 +499,65 @@ hash.
 
 All routes are under `/api`. Request and response bodies are Pydantic
 models. The frontend generates its TypeScript types from the OpenAPI
-schema.
+schema. "Built" marks what exists now.
 
-Registry:
+Registry and machine:
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/registry` | All entries, grouped by kind |
-| GET | `/registry/{kind}` | Entries of one kind |
-| GET | `/registry/{kind}/{id}` | One entry, with its parameter schema |
-| POST | `/configurations/validate` | Can this combination run, and why not |
-
-Hardware and queue:
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/hardware` | Hardware entries with detected specs, capabilities and runner status |
-| PATCH | `/hardware/{hid}` | Rename the hardware label |
-| GET | `/queue` | Running job and queued jobs, across sessions |
+| Method | Path | Purpose | Built |
+|---|---|---|---|
+| GET | `/registry` | All entries, grouped by kind | yes |
+| GET | `/registry/{kind}` | Entries of one kind | yes |
+| GET | `/registry/{kind}/{id}` | One entry | yes |
+| GET | `/configurations` | Every implementation and representation pair, runnable or the reasons not | yes |
+| GET | `/hardware` | Hardware with detected specs and capabilities | yes |
+| PATCH | `/hardware/local` | Rename the hardware label | yes |
+| GET | `/datasets` | Each dataset: missing, unverified, verified or mismatch | yes |
+| POST | `/datasets/{id}/download` | Queue a download job | yes |
+| GET | `/queue` | Running job and queued jobs, across sessions | yes |
 
 Sessions:
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/sessions` | List |
-| POST | `/sessions` | Create, empty or from the demo workload |
-| GET | `/sessions/{sid}` | Metadata, config and current step |
-| PATCH | `/sessions/{sid}/config` | Change configuration; the old version goes to `config_history.jsonl` |
-| GET | `/sessions/{sid}/steps` | Workflow steps with status |
-| GET | `/sessions/{sid}/export` | Zip of the session folder |
+| Method | Path | Purpose | Built |
+|---|---|---|---|
+| GET | `/sessions` | List | yes |
+| POST | `/sessions` | Create from name, question and config | yes |
+| GET | `/sessions/{sid}` | Metadata and config | yes |
+| PATCH | `/sessions/{sid}/config` | Change configuration; the old version goes to `config_history.jsonl` | yes |
+| GET | `/sessions/{sid}/steps` | Workflow steps with status | later |
+| GET | `/sessions/{sid}/export` | Zip of the session folder | later |
 
 Jobs:
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/sessions/{sid}/jobs` | Queue configurations × datasets; targeted jobs name a hypothesis |
-| GET | `/sessions/{sid}/jobs` | Jobs with status |
-| GET | `/jobs/{jid}` | One job, with its command and environment |
-| GET | `/jobs/{jid}/events` | Server-sent events stream |
-| DELETE | `/jobs/{jid}` | Cancel |
+| Method | Path | Purpose | Built |
+|---|---|---|---|
+| POST | `/sessions/{sid}/jobs` | Queue configurations × datasets; targeted jobs name a hypothesis | yes |
+| GET | `/sessions/{sid}/jobs` | Jobs with status | yes |
+| GET | `/jobs/{jid}` | One job: spec, status, events | yes |
+| GET | `/jobs/{jid}/events` | Server-sent events stream | yes |
+| DELETE | `/jobs/{jid}` | Cancel | yes |
 
 Results and analysis:
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/sessions/{sid}/results` | Rows, JSON or CSV, joined with configuration ids |
-| GET | `/sessions/{sid}/summary` | Medians and ranges per configuration and dataset |
-| GET | `/sessions/{sid}/comparisons` | Speedups with intervals, given baseline and measure |
-| GET | `/sessions/{sid}/validity` | Sleep check, cross-path checks, determinism |
-| GET | `/sessions/{sid}/observations` | Computed observations |
+| Method | Path | Purpose | Built |
+|---|---|---|---|
+| GET | `/sessions/{sid}/results` | Rows joined with configuration ids | yes |
+| GET | `/sessions/{sid}/summary` | Medians and ranges per configuration and dataset | yes |
+| GET | `/sessions/{sid}/environment` | Snapshots used in the session | yes |
+| GET | `/sessions/{sid}/comparisons` | Speedups with intervals, given baseline and measure | later |
+| GET | `/sessions/{sid}/validity` | Sleep check, cross-path checks, determinism | later |
+| GET | `/sessions/{sid}/observations` | Computed observations | later |
 
 Hypotheses:
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/sessions/{sid}/suggestions` | Start a suggestion request; returns its id |
-| GET | `/sessions/{sid}/suggestions/{rid}` | Status and ranked suggestions |
-| GET | `/sessions/{sid}/log` | All entries |
-| POST | `/sessions/{sid}/log` | Append an entry |
-| POST | `/sessions/{sid}/log/{eid}/evaluate` | Compute outcome status for a prediction from results |
-| GET | `/sessions/{sid}/log/verify` | Recompute hashes |
-| GET | `/sessions/{sid}/log/table` | The log as a LaTeX table, like `hypotheses.tex` |
-
-Environment:
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/sessions/{sid}/environment` | Snapshots used in the session |
+| Method | Path | Purpose | Built |
+|---|---|---|---|
+| GET | `/sessions/{sid}/log` | All entries | yes |
+| POST | `/sessions/{sid}/log` | Append an entry | yes |
+| GET | `/sessions/{sid}/log/verify` | Recompute the chain and check recorded files | yes |
+| POST | `/sessions/{sid}/suggestions` | Start a suggestion request; returns its id | later |
+| GET | `/sessions/{sid}/suggestions/{rid}` | Status and ranked suggestions | later |
+| POST | `/sessions/{sid}/log/{eid}/evaluate` | Compute outcome status for a prediction from results | later |
+| GET | `/sessions/{sid}/log/table` | The log as a LaTeX table, like `hypotheses.tex` | later |
 
 ## 8. Run scheduling
 
@@ -539,8 +568,11 @@ Runs execute one at a time, so they do not distort each other's timings.
   in sequence inside one process, with one warm-up, as in the paper.
 - Remote hardware gets its own queue per target. A remote job never blocks
   a local one, and the reverse.
-- On startup the backend takes an exclusive lock file in the sessions
-  directory, so a second backend instance cannot start a parallel queue.
+- On startup the backend takes an exclusive lock on `.egb.lock` in the data
+  directory, so a second backend on the same machine cannot start a parallel
+  queue, even with a different sessions directory.
+- On startup, jobs left queued or running by a previous backend are marked
+  `interrupted`.
 - While a job runs, the backend does no analysis work of its own. Analysis
   endpoints read files on request; suggestion requests wait in the queue
   behind the running job unless the suggester is remote.

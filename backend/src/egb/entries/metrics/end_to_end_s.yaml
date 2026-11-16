@@ -1,0 +1,7 @@
+id: end_to_end_s
+name: End-to-end time
+unit: "s"
+better: lower
+columns: [etl_s, processing_s]
+tasks: [community-detection, centrality]
+requires_ground_truth: false

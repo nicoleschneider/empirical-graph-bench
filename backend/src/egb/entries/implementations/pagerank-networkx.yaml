@@ -1,0 +1,12 @@
+id: pagerank-networkx
+name: NetworkX PageRank
+algorithm: pagerank
+library: networkx
+backend: networkx
+requires: []
+variants:
+  - representation: networkx-text
+    driver: gaib-runner
+    gaib_task: NX_PAGERANK
+    definition_task: NX_PAGERANK
+    gpu: false

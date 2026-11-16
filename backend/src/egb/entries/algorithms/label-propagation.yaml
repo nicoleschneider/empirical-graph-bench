@@ -1,0 +1,6 @@
+id: label-propagation
+name: Label propagation
+task: community-detection
+orientation: undirected
+parameters:
+  weight: null

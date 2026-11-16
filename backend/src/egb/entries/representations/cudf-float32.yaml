@@ -1,0 +1,5 @@
+id: cudf-float32
+name: cudf loading, float32
+loader: cudf.read_csv, nxcg.from_pandas_edgelist
+precision: float32
+requires: [cuda, cudf]

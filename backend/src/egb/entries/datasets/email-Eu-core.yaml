@@ -1,0 +1,16 @@
+id: email-Eu-core
+name: email-Eu-core
+directory: Email_EU_Core
+directed: true
+vertices: 1005
+edges: 16706
+graph:
+  file: email-Eu-core.txt
+  raw_file: email-Eu-core.txt.gz
+  url: https://snap.stanford.edu/data/email-Eu-core.txt.gz
+  sha256: 4b47acdb80197b085fe63c819c357ae488131ee904ed93d1b219a68b0f9e245f
+ground_truth:
+  file: email-Eu-core-department-labels.txt
+  raw_file: email-Eu-core-department-labels.txt.gz
+  url: https://snap.stanford.edu/data/email-Eu-core-department-labels.txt.gz
+  sha256: e5abe5b4581a480032a63adcf2576c161785f45692642c6ebb0b1276f0f33669

@@ -1,0 +1,7 @@
+id: nmi
+name: NMI
+unit: ""
+better: higher
+columns: [nmi]
+tasks: [community-detection]
+requires_ground_truth: true

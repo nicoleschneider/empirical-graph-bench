@@ -1,0 +1,16 @@
+id: louvain-nx-cugraph
+name: nx-cugraph Louvain
+algorithm: louvain
+library: networkx
+backend: cugraph
+requires: [cuda]
+variants:
+  - representation: networkx-text
+    driver: gaib-runner
+    gaib_task: NX_LOUVAIN_GPU
+    definition_task: NX_LOUVAIN
+    gpu: true
+  - representation: cudf-float32
+    driver: gaib-representation-test
+    gaib_task: NX_LOUVAIN_GPU_CUDF
+    script_task: louvain

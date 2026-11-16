@@ -1,0 +1,12 @@
+id: label-propagation-networkx
+name: NetworkX label propagation
+algorithm: label-propagation
+library: networkx
+backend: networkx
+requires: []
+variants:
+  - representation: networkx-text
+    driver: gaib-runner
+    gaib_task: NX_LPA
+    definition_task: NX_LPA
+    gpu: false
