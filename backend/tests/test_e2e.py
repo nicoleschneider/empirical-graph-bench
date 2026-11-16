@@ -171,7 +171,7 @@ def test_gpu_configurations_report_reason(client: httpx.Client) -> None:
         ("pagerank-nx-cugraph", "cudf-float32"),
         ("pagerank-nx-cugraph", "cudf-float64"),
     }
-    assert all(s["reasons"] and s["reasons"][0].startswith("Needs cuda.") for s in blocked)
+    assert all(s["reasons"] and s["reasons"][0].startswith("Needs CUDA") for s in blocked)
 
 
 def test_job_streams_progress(finished_job: dict) -> None:

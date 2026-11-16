@@ -34,8 +34,12 @@ class Settings:
         return self.data_dir / "pagerank_references"
 
     @property
-    def downloads_dir(self) -> Path:
-        return self.data_dir / "downloads"
+    def data_jobs_dir(self) -> Path:
+        return self.data_dir / "jobs"
+
+    @property
+    def dataset_properties(self) -> Path:
+        return self.data_dir / "dataset_properties.csv"
 
     @property
     def hardware_file(self) -> Path:

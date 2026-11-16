@@ -7,7 +7,7 @@ and a configuration decision with its evidence. It runs the benchmark code
 from [HARD-graph-benchmark](https://github.com/nicoleschneider/HARD-graph-benchmark)
 (gaib) unchanged, as a pinned submodule.
 
-Status: backend core only. See `docs/architecture.md` and `docs/design.md`.
+Status: backend core, analysis and the first two screens. See `docs/architecture.md` and `docs/design.md`.
 
 ## Setup
 
@@ -33,6 +33,15 @@ npm install
 ```
 uv run --project backend egb serve
 ```
+
+In a second terminal:
+
+```
+cd frontend
+npm run dev
+```
+
+The app is at `http://localhost:5173`. Vite forwards `/api` to the backend.
 
 The API is at `http://127.0.0.1:8000/api`, with interactive docs at
 `http://127.0.0.1:8000/docs`. Download a dataset before running on it:

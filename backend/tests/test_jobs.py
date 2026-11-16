@@ -79,8 +79,8 @@ def test_gpu_configurations_blocked_on_cpu(registry: Registry) -> None:
     blocked = statuses[("pagerank-nx-cugraph", "cudf-float64")]
     assert not blocked.runnable
     assert blocked.reasons == [
-        "Needs cuda. No NVIDIA GPU found.",
-        "Needs cudf. No NVIDIA GPU found.",
+        "Needs CUDA and cudf.",
+        "No NVIDIA GPU found.",
     ]
 
 
@@ -116,7 +116,7 @@ def test_runner_job_mirrors_gaib_definitions(setup, registry: Registry) -> None:
 
 def test_blocked_configuration_rejected(setup, registry: Registry) -> None:
     settings, datasets, store, session = setup
-    with pytest.raises(ValueError, match="c3: Needs cuda"):
+    with pytest.raises(ValueError, match="c3: Needs CUDA and cudf"):
         resolve_session_job(
             JobRequest(configurations=["c3"], datasets=["email-Eu-core"], kind="exploratory"),
             session,

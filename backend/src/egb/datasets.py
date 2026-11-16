@@ -1,3 +1,4 @@
+import csv
 import hashlib
 from pathlib import Path
 from typing import Literal
@@ -14,6 +15,7 @@ class DatasetStatus(BaseModel):
     state: Literal["missing", "unverified", "verified", "mismatch"]
     path: str
     ground_truth: bool
+    properties: dict[str, int | float | str | None] | None = None
 
 
 def sha256(path: Path) -> str:
@@ -69,3 +71,24 @@ class DatasetStore:
             path=str(self.graph_path(dataset)),
             ground_truth=dataset.ground_truth is not None,
         )
+
+
+def dataset_properties(path: Path) -> dict[str, dict[str, int | float | str | None]]:
+    if not path.exists():
+        return {}
+    with path.open(newline="") as f:
+        return {
+            row["dataset"]: {k: coerce(v) for k, v in row.items() if k != "dataset"}
+            for row in csv.DictReader(f)
+        }
+
+
+def coerce(value: str) -> int | float | str | None:
+    if value == "":
+        return None
+    for kind in (int, float):
+        try:
+            return kind(value)
+        except ValueError:
+            pass
+    return value

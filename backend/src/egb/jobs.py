@@ -12,6 +12,8 @@ from egb.registry import Registry
 from egb.sessions import LogEntry, Session, now
 from egb.settings import Settings
 
+CAPABILITY_NAMES = {"cpu": "the benchmark environment", "cuda": "CUDA", "cudf": "cudf"}
+
 
 class JobRequest(BaseModel):
     configurations: list[str]
@@ -43,7 +45,7 @@ class Invocation(BaseModel):
 class JobSpec(BaseModel):
     id: str
     session_id: str | None
-    kind: Literal["exploratory", "targeted", "download"]
+    kind: Literal["exploratory", "targeted", "download", "properties"]
     hypothesis: str | None
     baseline: str | None = None
     hardware_label: str
@@ -78,13 +80,16 @@ def new_job_id() -> str:
 def blockers(
     registry: Registry, hardware: Hardware, implementation: str, representation: str
 ) -> list[str]:
-    reasons = []
-    for capability in ["cpu"] + registry.requirements(implementation, representation):
-        if capability not in hardware.capabilities:
-            reasons.append(
-                f"Needs {capability}. {hardware.unavailable.get(capability, '')}".strip()
-            )
-    return reasons
+    needed = ["cpu"] + registry.requirements(implementation, representation)
+    missing = [c for c in needed if c not in hardware.capabilities]
+    if not missing:
+        return []
+    names = [CAPABILITY_NAMES.get(c, c) for c in missing]
+    listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+    explanations = list(
+        dict.fromkeys(hardware.unavailable[c] for c in missing if c in hardware.unavailable)
+    )
+    return [f"Needs {listed}.", *explanations]
 
 
 def configuration_statuses(registry: Registry, hardware: Hardware) -> list[ConfigurationStatus]:
@@ -334,7 +339,8 @@ def resolve_session_job(
     )
 
 
-def resolve_download(
+def resolve_dataset_job(
+    kind: Literal["download", "properties"],
     dataset_ids: list[str],
     registry: Registry,
     hardware: Hardware,
@@ -345,6 +351,8 @@ def resolve_download(
     unknown = [d for d in dataset_ids if d not in registry.datasets]
     if unknown:
         raise ValueError(f"Unknown datasets: {', '.join(unknown)}.")
+    if not dataset_ids:
+        raise ValueError("No datasets to process. Download one first.")
     if "cpu" not in hardware.capabilities:
         raise ValueError(hardware.unavailable["cpu"])
     job_dir.mkdir(parents=True)
@@ -364,26 +372,35 @@ def resolve_download(
             indent=4,
         )
     )
-    invocation = Invocation(
-        driver="gaib-download",
-        argv=[
+    common = [
+        "--datasets-list",
+        str(listing),
+        "--datasets-directory",
+        str(settings.datasets_dir),
+        "--manifest",
+        str(settings.manifest),
+    ]
+    if kind == "download":
+        argv = [
             str(settings.bench_python),
             str(settings.gaib_dir / "download_datasets.py"),
-            "--datasets-list",
-            str(listing),
-            "--datasets-directory",
-            str(settings.datasets_dir),
-            "--manifest",
-            str(settings.manifest),
-        ],
-        cwd=str(work_dir(job_dir)),
-        env={},
-        results_csv=None,
+            *common,
+        ]
+    else:
+        argv = [
+            str(settings.bench_python),
+            str(settings.gaib_dir / "dataset_properties.py"),
+            *common,
+            "--output",
+            str(settings.dataset_properties),
+        ]
+    invocation = Invocation(
+        driver=f"gaib-{kind}", argv=argv, cwd=str(work_dir(job_dir)), env={}, results_csv=None
     )
     return JobSpec(
         id=job_id,
         session_id=None,
-        kind="download",
+        kind=kind,
         hypothesis=None,
         hardware_label=hardware.label,
         repetitions=None,

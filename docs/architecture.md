@@ -85,6 +85,10 @@ The app calls it and does not reimplement the timed path.
      cross-path validity CSVs.
    - Dataset downloads: run `download_datasets.py` with a datasets list
      written from the registry.
+   - Dataset properties: run `dataset_properties.py` over every downloaded
+     dataset, writing `data/dataset_properties.csv` (vertices, edges, degree
+     statistics, clustering, components). On the four datasets downloaded
+     here it matches the paper's committed `dataset_properties.csv` exactly.
 5. The backend does not import gaib. It reads gaib's CSVs as written, so it
    needs none of gaib's dependencies.
 6. The environment snapshot of every job records the submodule commit, a
@@ -501,7 +505,8 @@ sessions/<session_id>/
 
 Shared across sessions, under a data directory set by a CLI option:
 `bench-env/`, `datasets/` in gaib's layout with its `manifest.json`,
-`pagerank_references/`, `downloads/<job_id>/` with `downloads/jobs.jsonl`,
+`pagerank_references/`, `jobs/<job_id>/` with `jobs/jobs.jsonl` for download
+and properties jobs, `dataset_properties.csv`,
 `hardware.json`, and the run lock `.egb.lock`. gaib keys the reference cache by dataset hash,
 orientation, alpha, tolerance and iteration limit, so sharing it is safe.
 
@@ -594,6 +599,7 @@ Registry and machine:
 | PATCH | `/hardware/local` | Rename the hardware label | yes |
 | GET | `/datasets` | Each dataset: missing, unverified, verified or mismatch | yes |
 | POST | `/datasets/{id}/download` | Queue a download job | yes |
+| POST | `/datasets/properties` | Queue a properties job over downloaded datasets; `GET /datasets` then includes them | yes |
 | GET | `/queue` | Running job and queued jobs, across sessions | yes |
 
 Sessions:
@@ -666,29 +672,28 @@ Runs execute one at a time, so they do not distort each other's timings.
 
 ## 9. Workflow steps
 
-The steps are Algorithm 1 of the paper, one screen each. Each step shows
-the algorithm's guiding question.
+The left rail shows the six steps of Algorithm 1, one per `State` line.
+Steps 3 to 6 sit inside a bracket marked "Repeat until decided", the
+algorithm's `Until`. Each step's screen shows the algorithm's guiding
+question under its title. The current step and screen take the accent color.
 
-Inputs: a workload W (tasks and datasets) and candidate configurations C
-(hardware, algorithms, representations). Output: a configuration decision
-and the evidence supporting it.
-
-| Step | Algorithm 1 | Question shown | What the app does |
+| Step | Algorithm 1 | Question shown | Screens |
 |---|---|---|---|
-| 1. Characterize | Characterize W and choose metrics M | What are we studying? How should we measure it? | Pick tasks, datasets and C. Run gaib's `dataset_properties.py` on the datasets through the run queue. Choose M (per-phase time, effectiveness). |
-| 2. Explore | Run exploratory experiments on C0 ⊂ C; observe | Which interactions suggest dominant bottlenecks or unexpected results? | Pick C0, run it, show summaries, ETL share and validity checks. Record observations. |
-| 3. Hypothesize | Form hypotheses H with falsifiable predictions; record them | Why these results? What would show we're wrong? | Show suggestions. Edit and record hypotheses, predictions and validity checks. |
-| 4. Design | Add to C any configuration H implicates | What configurations would isolate the hypothesized cause? | Add the implicated configurations to C, each linked to its hypothesis. |
-| 5. Run | Run the experiments, measuring M | | Queue and run the targeted experiments. |
-| 6. Compare | Compare results with predictions and explain them | Do observations match predictions? What explains results? | Compute each prediction's status. Record outcomes and explanations. |
-| 7. Decide | Until the evidence supports a configuration decision | Do we understand enough to make a configuration decision? | Return to step 3, or record the decision. |
-| 8. Report | Return decision and the recorded evidence | | Show the decision with the log, results and environment it rests on. Export the session. |
+| 1. Characterize | Characterize W and choose metrics M | What are we studying? How should we measure it? | Workload (tasks, datasets, dataset properties); Configurations (hardware, algorithms and loading, repetitions) |
+| 2. Explore | Run exploratory experiments on C0 ⊂ C; observe | Which interactions suggest dominant bottlenecks or unexpected results? | Not built |
+| 3. Hypothesize | Form hypotheses H with falsifiable predictions; record them | Why these results? What would show we're wrong? | Not built |
+| 4. Design | Add to C any configuration H implicates | What configurations would isolate the hypothesized cause? | Not built |
+| 5. Run | Run the experiments, measuring M | | Not built |
+| 6. Compare | Compare results with predictions and explain them; decide or repeat | Do observations match predictions? What explains results? | Not built |
 
-Steps 3 to 7 repeat. Each pass through them is an iteration, numbered in the
-log, so the UI can show iteration 2, step 4.
+The decision and the report (`Return decision and the recorded evidence`)
+come at the end of step 6, when the practitioner stops repeating.
 
-`GET /sessions/{sid}/steps` returns this list with each step's status and
-the current iteration. The UI marks the current step with the accent color.
+The right panel holds the iteration trail: the log entries of each pass
+through steps 3 to 6. It is empty until the first hypothesis is recorded.
+
+Steps 3 to 6 repeat. Each pass through them is an iteration, numbered in the
+log.
 
 ## 10. Open questions
 

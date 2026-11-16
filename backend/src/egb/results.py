@@ -1,21 +1,11 @@
 import json
 from pathlib import Path
 
+from egb.datasets import coerce
 from egb.jobs import JobSpec
 from egb.registry import Registry
 from egb.runners import read_rows
 from egb.validity import CrossPath, SavedOutput, read_cross_paths
-
-
-def coerce(value: str) -> int | float | str | None:
-    if value == "":
-        return None
-    for kind in (int, float):
-        try:
-            return kind(value)
-        except ValueError:
-            pass
-    return value
 
 
 def job_specs(session_dir: Path) -> list[JobSpec]:

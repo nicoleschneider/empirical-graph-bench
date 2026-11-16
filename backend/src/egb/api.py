@@ -20,7 +20,7 @@ from egb.analysis import (
     load_analysis_settings,
     runs_from_rows,
 )
-from egb.datasets import DatasetStatus, DatasetStore
+from egb.datasets import DatasetStatus, DatasetStore, dataset_properties
 from egb.hardware import Hardware, detect_local, store_label
 from egb.jobs import (
     ConfigurationStatus,
@@ -28,7 +28,7 @@ from egb.jobs import (
     JobSpec,
     configuration_statuses,
     new_job_id,
-    resolve_download,
+    resolve_dataset_job,
     resolve_session_job,
 )
 from egb.predictions import Evaluation, evaluate
@@ -107,11 +107,11 @@ class Core:
         self.comparer = bench_comparer(settings.bench_python, settings.gaib_dir)
         self.gaib_commit = git_state(settings.gaib_root)["commit"]
         self.app_commit = git_state(Path(__file__).parent)["commit"]
-        settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+        settings.data_jobs_dir.mkdir(parents=True, exist_ok=True)
 
     @property
-    def downloads_log(self) -> Path:
-        return self.settings.downloads_dir / "jobs.jsonl"
+    def data_jobs_log(self) -> Path:
+        return self.settings.data_jobs_dir / "jobs.jsonl"
 
     def mark_interrupted(self) -> None:
         for meta in self.sessions.metas():
@@ -120,26 +120,26 @@ class Core:
                     self.sessions.append_job_record(
                         meta.id, {"job_id": job_id, "status": "interrupted", "at": now()}
                     )
-        for job_id, status in self.download_statuses().items():
+        for job_id, status in self.data_job_statuses().items():
             if status not in TERMINAL:
                 append_jsonl(
-                    self.downloads_log, {"job_id": job_id, "status": "interrupted", "at": now()}
+                    self.data_jobs_log, {"job_id": job_id, "status": "interrupted", "at": now()}
                 )
 
-    def download_statuses(self) -> dict[str, str]:
-        return {r["job_id"]: r["status"] for r in read_jsonl(self.downloads_log)}
+    def data_job_statuses(self) -> dict[str, str]:
+        return {r["job_id"]: r["status"] for r in read_jsonl(self.data_jobs_log)}
 
     def job_location(self, job_id: str) -> tuple[Path, str | None]:
         for path in self.settings.sessions_dir.glob(f"*/jobs/{job_id}"):
             return path, path.parent.parent.name
-        path = self.settings.downloads_dir / job_id
+        path = self.settings.data_jobs_dir / job_id
         if path.exists():
             return path, None
         raise HTTPException(404, f"No job {job_id}.")
 
     def stored_status(self, job_id: str, session_id: str | None) -> str | None:
         statuses = (
-            self.download_statuses()
+            self.data_job_statuses()
             if session_id is None
             else self.sessions.job_statuses(session_id)
         )
@@ -257,27 +257,42 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/api/datasets")
     def datasets() -> list[DatasetStatus]:
+        properties = dataset_properties(settings.dataset_properties)
         return [
-            core.datasets.status(d, compute=not core.queue.busy)
+            core.datasets.status(d, compute=not core.queue.busy).model_copy(
+                update={"properties": properties.get(d.id)}
+            )
             for d in core.registry.datasets.values()
         ]
 
-    @app.post("/api/datasets/{dataset_id}/download", status_code=202)
-    async def download(dataset_id: str) -> JobSpec:
+    async def submit_data_job(kind: str, dataset_ids: list[str]) -> JobSpec:
         job_id = new_job_id()
-        job_dir = settings.downloads_dir / job_id
+        job_dir = settings.data_jobs_dir / job_id
         try:
-            spec = resolve_download(
-                [dataset_id], core.registry, core.hardware, settings, job_id, job_dir
+            spec = resolve_dataset_job(
+                kind, dataset_ids, core.registry, core.hardware, settings, job_id, job_dir
             )
         except ValueError as error:
             raise bad_request(error)
         (job_dir / "spec.json").write_text(spec.model_dump_json(indent=2))
         handle = JobHandle(
-            spec, job_dir, None, lambda record: append_jsonl(core.downloads_log, record)
+            spec, job_dir, None, lambda record: append_jsonl(core.data_jobs_log, record)
         )
         await core.queue.submit(handle)
         return spec
+
+    @app.post("/api/datasets/{dataset_id}/download", status_code=202)
+    async def download(dataset_id: str) -> JobSpec:
+        return await submit_data_job("download", [dataset_id])
+
+    @app.post("/api/datasets/properties", status_code=202)
+    async def compute_properties() -> JobSpec:
+        present = [
+            d.id
+            for d in core.registry.datasets.values()
+            if core.datasets.status(d, compute=False).state != "missing"
+        ]
+        return await submit_data_job("properties", present)
 
     @app.get("/api/queue")
     def queue() -> QueueView:
