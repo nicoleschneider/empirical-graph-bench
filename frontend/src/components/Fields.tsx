@@ -32,9 +32,10 @@ type NumberFieldProps = {
   max: number;
   onChange: (value: number) => void;
   hint?: ReactNode;
+  disabled?: boolean;
 };
 
-export function NumberField({ id, label, value, min, max, onChange, hint }: NumberFieldProps) {
+export function NumberField({ id, label, value, min, max, onChange, hint, disabled }: NumberFieldProps) {
   return (
     <div className="field">
       <label htmlFor={id}>{label}</label>
@@ -44,6 +45,7 @@ export function NumberField({ id, label, value, min, max, onChange, hint }: Numb
         value={value}
         min={min}
         max={max}
+        disabled={disabled}
         onChange={(event) => {
           const next = Number(event.target.value);
           if (Number.isInteger(next) && next >= min && next <= max) {

@@ -1,5 +1,5 @@
 etl_dominant_share: 0.5
-processing_dominant_share: 0.9
+processing_dominant_share: 0.5
 modularity_tolerance: 0.01
 nmi_tolerance: 0.01
 community_difference: 0.25

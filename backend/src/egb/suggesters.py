@@ -7,6 +7,7 @@ from egb.analysis import Analysis, AnalysisSettings, ConfigKey, Summary
 from egb.predictions import Prediction
 from egb.registry import Registry
 from egb.sessions import LogEntry
+from egb.units import percent, seconds
 from egb.validity import side_effects
 
 
@@ -76,10 +77,6 @@ class HypothesisSuggester(Protocol):
     async def suggest(self, request: SuggestionRequest) -> SuggestionResponse: ...
 
 
-def seconds(value: float) -> str:
-    return f"{value:.3g} s"
-
-
 class Namer:
     def __init__(self, registry: Registry):
         self.registry = registry
@@ -97,6 +94,26 @@ class Namer:
         if metric_id in self.registry.metrics:
             return self.registry.metrics[metric_id].name.lower().replace("etl", "ETL")
         return metric_id.replace("_", " ")
+
+    def brief(self, key: ConfigKey, other: ConfigKey) -> str:
+        implementation = self.registry.implementations[key.implementation]
+        other_algorithm = self.registry.implementations[other.implementation].algorithm
+        if key.hardware != other.hardware:
+            return f"{key.hardware} {self.algorithm(key)}"
+        if (
+            key.implementation != other.implementation
+            and implementation.algorithm == other_algorithm
+        ):
+            return implementation.name
+        if key.representation != other.representation:
+            representation = self.registry.representations[key.representation].name
+            return f"{self.algorithm(key)} with {representation}"
+        return self.algorithm(key)
+
+    def where(self, pairs: list[tuple[str, str]], reference: str) -> str:
+        if len(pairs) == 1:
+            return f"{pairs[0][0]} on {pairs[0][1]}"
+        return f"{reference} medians on {len(pairs)} datasets"
 
     def datasets(self, ids: list[str]) -> str:
         return ids[0] if len(ids) == 1 else ", ".join(ids[:-1]) + f" and {ids[-1]}"
@@ -127,7 +144,7 @@ def observe(analysis: Analysis, registry: Registry) -> list[Observation]:
                     "fastest": b.fastest.id,
                     "fastest_end_to_end_s": b.fastest_end_to_end_s,
                 },
-                statement=f"{phase}: {b.share:.0%} of end-to-end time. {names.short(b.config)}, {b.dataset}.",
+                statement=f"{phase}: {percent(b.share)} of end-to-end time. {names.short(b.config)}, {b.dataset}.",
             )
         )
     for d in analysis.differences:
@@ -195,8 +212,12 @@ class RuleSuggester:
             suggester=self.id, status="complete", message=None, suggestions=ranked
         )
 
-    def losses(
-        self, analysis: Analysis, share_of: Literal["etl", "processing"], minimum: float
+    def dominated(
+        self,
+        analysis: Analysis,
+        share_of: Literal["etl", "processing"],
+        minimum: float,
+        losing_only: bool,
     ) -> dict[ConfigKey, list[Summary]]:
         index = summary_index(analysis)
         found: dict[ConfigKey, list[Summary]] = defaultdict(list)
@@ -204,33 +225,36 @@ class RuleSuggester:
             share = index[(b.config, b.dataset)].etl_share
             if share_of == "processing":
                 share = 1 - share
-            if share >= minimum and b.config != b.fastest:
+            if share >= minimum and not (losing_only and b.config == b.fastest):
                 found[b.config].append(index[(b.config, b.dataset)])
         return found
 
-    def fastest_of(self, analysis: Analysis, summary: Summary) -> Summary:
-        index = summary_index(analysis)
-        bottleneck = next(
-            b
-            for b in analysis.bottlenecks
-            if b.config == summary.config and b.dataset == summary.dataset
-        )
-        return index[(bottleneck.fastest, summary.dataset)]
+    def reference_of(self, analysis: Analysis, summary: Summary) -> Summary:
+        others = [
+            s
+            for s in analysis.summaries
+            if s.task == summary.task
+            and s.dataset == summary.dataset
+            and s.config != summary.config
+        ]
+        return min(others, key=lambda s: s.end_to_end_s.median) if others else summary
 
     def time_predictions(
         self, analysis: Analysis, subject: ConfigKey, losing: list[Summary]
     ) -> list[PredictionDraft]:
         by_reference: dict[ConfigKey, list[Summary]] = defaultdict(list)
         for summary in losing:
-            by_reference[self.fastest_of(analysis, summary).config].append(summary)
+            by_reference[self.reference_of(analysis, summary).config].append(summary)
         drafts = []
         for reference, group in sorted(by_reference.items(), key=lambda item: item[0].id):
-            medians = [self.fastest_of(analysis, s).end_to_end_s.median for s in group]
-            places = self.names.values([(seconds(m), s.dataset) for m, s in zip(medians, group)])
+            medians = [self.reference_of(analysis, s).end_to_end_s.median for s in group]
+            places = self.names.where(
+                [(seconds(m), s.dataset) for m, s in zip(medians, group)],
+                self.names.brief(reference, subject),
+            )
             drafts.append(
                 PredictionDraft(
-                    text=f"{self.names.short(subject)}: end-to-end time below {places} "
-                    f"({self.names.short(reference)} medians).",
+                    text=f"{self.names.brief(subject, reference)}: end-to-end time below {places}.",
                     prediction=Prediction(
                         metric="end_to_end_s",
                         subject=subject,
@@ -244,7 +268,8 @@ class RuleSuggester:
 
     def gap(self, analysis: Analysis, losing: list[Summary]) -> float:
         return max(
-            s.end_to_end_s.median / self.fastest_of(analysis, s).end_to_end_s.median for s in losing
+            s.end_to_end_s.median / self.reference_of(analysis, s).end_to_end_s.median
+            for s in losing
         )
 
     def same_output_checks(
@@ -253,8 +278,7 @@ class RuleSuggester:
         if self.registry.task_of(targeted.implementation).output == "scores":
             return [
                 ValidityCheckDraft(
-                    text=f"Scores match {self.names.short(baseline)} within L1 "
-                    f"{self.settings.validity_l1_tolerance:g}.",
+                    text=f"Scores match the baseline within L1 {self.settings.validity_l1_tolerance:g}.",
                     check="l1",
                     expected=f"<= {self.settings.validity_l1_tolerance:g}",
                     targeted=targeted,
@@ -264,7 +288,7 @@ class RuleSuggester:
             ]
         return [
             ValidityCheckDraft(
-                text=f"Partitions identical to {self.names.short(baseline)} at the same seed.",
+                text="Partitions identical to the baseline at the same seed.",
                 check="identical",
                 expected="true",
                 targeted=targeted,
@@ -272,8 +296,7 @@ class RuleSuggester:
                 datasets=datasets,
             ),
             ValidityCheckDraft(
-                text=f"Modularity within {self.settings.modularity_tolerance:g} of "
-                f"{self.names.short(baseline)}.",
+                text=f"Modularity within {self.settings.modularity_tolerance:g} of the baseline.",
                 check="modularity_difference",
                 expected=f"within {self.settings.modularity_tolerance:g}",
                 targeted=targeted,
@@ -284,8 +307,8 @@ class RuleSuggester:
 
     def etl_dominates(self, analysis: Analysis, candidates: list[ConfigKey]) -> list[Suggestion]:
         suggestions = []
-        for config, losing in self.losses(
-            analysis, "etl", self.settings.etl_dominant_share
+        for config, losing in self.dominated(
+            analysis, "etl", self.settings.etl_dominant_share, losing_only=True
         ).items():
             current = self.registry.representations[config.representation]
             options = [
@@ -320,8 +343,8 @@ class RuleSuggester:
                     source="rules:etl-dominates",
                     rule="etl-dominates",
                     hypothesis=(
-                        f"{self.names.short(config)} loses end to end on {self.names.datasets(datasets)} "
-                        f"because of loading (ETL up to {share:.0%}), not computation."
+                        f"Loading takes up to {percent(share)} of {self.names.algorithm(config)} time; "
+                        f"{self.registry.representations[target.representation].name} cuts it."
                     ),
                     observation_ids=[f"phase:{config.id}:{s.dataset}" for s in losing],
                     change=Change(
@@ -346,8 +369,8 @@ class RuleSuggester:
         self, analysis: Analysis, candidates: list[ConfigKey]
     ) -> list[Suggestion]:
         suggestions = []
-        for config, losing in self.losses(
-            analysis, "processing", self.settings.processing_dominant_share
+        for config, losing in self.dominated(
+            analysis, "processing", self.settings.processing_dominant_share, losing_only=False
         ).items():
             task = self.registry.task_of(config.implementation).id
             algorithm = self.registry.implementations[config.implementation].algorithm
@@ -385,11 +408,13 @@ class RuleSuggester:
         if kind == "algorithm":
             quality = self.quality_metric(config)
             values = [s.effectiveness[quality].median for s in losing if quality in s.effectiveness]
-            places = self.names.values([(f"{v:.4g}", s.dataset) for v, s in zip(values, losing)])
+            places = self.names.where(
+                [(f"{v:.4g}", s.dataset) for v, s in zip(values, losing)],
+                self.names.brief(config, target),
+            )
             predictions.append(
                 PredictionDraft(
-                    text=f"{self.names.short(target)}: {self.names.metric(quality)} below {places} "
-                    f"({self.names.short(config)} medians).",
+                    text=f"{self.names.brief(target, config)}: {self.names.metric(quality)} below {places}.",
                     prediction=Prediction(
                         metric=quality,
                         subject=target,
@@ -403,10 +428,10 @@ class RuleSuggester:
                 f"Algorithm changes from {self.names.algorithm(config)} to {self.names.algorithm(target)}; "
                 f"outputs will differ."
             )
-            change_text = f"switching to {self.names.algorithm(target)}"
+            change_text = self.names.algorithm(target)
         else:
             checks = self.same_output_checks(target, config, datasets)
-            change_text = f"moving to {target.hardware}"
+            change_text = target.hardware
         return Suggestion(
             key=f"processing-dominates:{config.id}:{target.id}",
             rank=0,
@@ -414,8 +439,8 @@ class RuleSuggester:
             source="rules:processing-dominates",
             rule="processing-dominates",
             hypothesis=(
-                f"{self.names.short(config)} loses on {self.names.datasets(datasets)} because processing "
-                f"dominates (at least {share:.0%}); {change_text} cuts it."
+                f"Processing takes at least {percent(share)} of {self.names.algorithm(config)} time; "
+                f"{change_text} cuts it."
             ),
             observation_ids=[f"phase:{config.id}:{s.dataset}" for s in losing],
             change=Change(kind=kind, source=config, target=target, datasets=datasets),
@@ -442,8 +467,7 @@ class RuleSuggester:
                     source="rules:different-effectiveness",
                     rule="different-effectiveness",
                     hypothesis=(
-                        f"{self.names.short(d.config)} is faster on {d.dataset} but its output differs from "
-                        f"{self.names.short(d.other)}."
+                        f"{self.names.brief(d.config, d.other)} is faster on {d.dataset} but its output differs."
                     ),
                     observation_ids=[f"{d.kind}:{d.config.id}:{d.other.id}:{d.dataset}"],
                     change=Change(
@@ -451,8 +475,8 @@ class RuleSuggester:
                     ),
                     predictions=[
                         PredictionDraft(
-                            text=f"{self.names.short(d.config)}: {self.names.metric(metric)} stays {word} "
-                            f"{theirs:.4g} on {d.dataset} ({self.names.short(d.other)} median).",
+                            text=f"{self.names.brief(d.config, d.other)}: {self.names.metric(metric)} {word} "
+                            f"{theirs:.4g} on {d.dataset} again.",
                             prediction=Prediction(
                                 metric=metric,
                                 subject=d.config,
@@ -502,9 +526,8 @@ class RuleSuggester:
                     source="rules:dataset-dependent",
                     rule="dataset-dependent",
                     hypothesis=(
-                        f"The fastest {self.registry.tasks[c.task].name.lower()} configuration depends on graph "
-                        f"size: {self.names.short(small)} up to {low:,} edges, "
-                        f"{self.names.short(large)} from {high:,}."
+                        f"The fastest {self.registry.tasks[c.task].name.lower()} configuration changes "
+                        f"between {low:,} and {high:,} edges."
                     ),
                     observation_ids=[f"crossover:{c.task}"],
                     change=Change(kind="datasets", source=None, target=None, datasets=between),

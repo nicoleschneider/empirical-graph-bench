@@ -455,7 +455,7 @@ medians from the data.
 | Rule | Fires when | Suggests | Pre-filled prediction |
 |---|---|---|---|
 | `etl-dominates` | ETL share ≥ 50% on datasets where the configuration is not fastest, and another representation of its implementation is runnable | Representation change, preferring the same precision | End-to-end below the fastest configuration's medians on those datasets; L1 or partition validity checks |
-| `processing-dominates` | Processing share ≥ 90% on datasets where it is not fastest | Algorithm change on the same hardware, or hardware change to an accelerated implementation of the same algorithm and representation | End-to-end below the fastest medians; for algorithm changes, quality below the current medians |
+| `processing-dominates` | Processing share ≥ 50 % on any dataset, whether or not it is fastest; the prediction's reference is the fastest other configuration, or the configuration itself when it has no competitor | Algorithm change on the same hardware, or hardware change to an accelerated implementation of the same algorithm and representation | End-to-end below the fastest medians; for algorithm changes, quality below the current medians |
 | `different-effectiveness` | A faster configuration's effectiveness differs | Validity check against the slower one | The difference persists, in its observed direction |
 | `dataset-dependent` | The fastest configuration changes with dataset | Datasets between the crossover sizes | The larger-graph winner wins on them; if none is registered, a note to add one |
 
@@ -542,6 +542,9 @@ no endpoint to edit or delete an entry.
 }
 ```
 
+- `details`: free-form structured data. Outcomes store the overall status,
+  each prediction's evaluation, side effects and failed validity checks;
+  decisions store the chosen configuration and caveats per task.
 - `kind`: `observation`, `hypothesis`, `prediction`, `validity_check`,
   `revision`, `amendment`, `outcome`, `explanation`, `decision`. The first
   seven are the rows of the paper's hypothesis table; `explanation` and
@@ -647,6 +650,7 @@ Hypotheses:
 | GET | `/sessions/{sid}/suggestions/{rid}` | A stored suggestion response | yes |
 | POST | `/sessions/{sid}/log/{eid}/evaluate` | Evaluate a recorded structured prediction | yes |
 | GET | `/sessions/{sid}/log/table` | The log as a LaTeX table, like `hypotheses.tex` | later |
+| GET | `/sessions/{sid}/report.md` | Markdown report with provenance | yes |
 
 ## 8. Run scheduling
 
@@ -674,26 +678,40 @@ Runs execute one at a time, so they do not distort each other's timings.
 
 The left rail shows the six steps of Algorithm 1, one per `State` line.
 Steps 3 to 6 sit inside a bracket marked "Repeat until decided", the
-algorithm's `Until`. Each step's screen shows the algorithm's guiding
-question under its title. The current step and screen take the accent color.
+algorithm's `Until`. Below it, Decision is the algorithm's `Return`. Each
+screen shows the algorithm's guiding question under its title. The current
+step takes the accent color.
 
-| Step | Algorithm 1 | Question shown | Screens |
+| Step | Algorithm 1 | Screen | What it does |
 |---|---|---|---|
-| 1. Characterize | Characterize W and choose metrics M | What are we studying? How should we measure it? | Workload (tasks, datasets, dataset properties); Configurations (hardware, algorithms and loading, repetitions) |
-| 2. Explore | Run exploratory experiments on C0 ⊂ C; observe | Which interactions suggest dominant bottlenecks or unexpected results? | Not built |
-| 3. Hypothesize | Form hypotheses H with falsifiable predictions; record them | Why these results? What would show we're wrong? | Not built |
-| 4. Design | Add to C any configuration H implicates | What configurations would isolate the hypothesized cause? | Not built |
-| 5. Run | Run the experiments, measuring M | | Not built |
-| 6. Compare | Compare results with predictions and explain them; decide or repeat | Do observations match predictions? What explains results? | Not built |
+| 1. Characterize | Characterize W and choose metrics M | Workload, Configurations | Tasks, datasets and their properties; hardware, algorithms and loading, repetitions. Read-only once a session exists. |
+| 2. Explore | Run exploratory experiments on C0 ⊂ C; observe | Explore | Creates the session, runs C0 on every dataset with live progress, then per-dataset ETL and processing bars, phase medians with the dominant phase highlighted, and an effectiveness table. |
+| 3. Hypothesize | Form hypotheses H with falsifiable predictions; record them | Hypothesize | Suggestions from the rules or agent suggester. Each hypothesis and prediction is editable: statement, metric, comparison, threshold (a configuration's median or a fixed value) and datasets, with the resulting thresholds per dataset. Record locks it and shows its time and entry id. |
+| 4. Design and 5. Run | Add the implicated configuration to C; run it | Test | The diff view of the one changed setting against the baseline. Run test adds the target to C if needed and runs it as a targeted job with the baseline named. Validity checks run when it finishes. |
+| 6. Compare | Compare results with predictions and explain them | Result | Each prediction's status (✓ ✗ ≈) with medians, threshold, ratio, 95 % interval and runs; side effects and failed validity checks; an explanation. Iterate or Decide records the outcome. |
+| Return | Return decision and the recorded evidence | Decision | The chosen configuration per task, with caveats, the full trail, provenance, and export as Markdown or PDF. |
 
-The decision and the report (`Return decision and the recorded evidence`)
-come at the end of step 6, when the practitioner stops repeating.
+The right panel is the iteration trail: a swimlane with one lane per task,
+grouped by hardware, and one column per iteration (Explore, 1, 2, ...,
+Chosen), like the paper's case study figure. Each cell shows the
+configuration tested in that lane and its outcome status.
 
-The right panel holds the iteration trail: the log entries of each pass
-through steps 3 to 6. It is empty until the first hypothesis is recorded.
+The decision screen preselects, per task, the configuration that is fastest
+on most datasets among those whose quality metric (modularity, or top-100
+overlap) is within 0.01 of the best. Its caveats list quality gaps, every
+prediction outcome for that task, and the side effects of the chosen
+configuration's test.
 
-Steps 3 to 6 repeat. Each pass through them is an iteration, numbered in the
-log.
+### Report
+
+`GET /api/sessions/{sid}/report.md` returns the session as Markdown: the
+decision and caveats; the trail with timestamps; each prediction's per-dataset
+medians, ratio, interval and status; summaries per configuration and dataset;
+and provenance (session, app and gaib commits, log verification, each
+environment snapshot with hardware, Python, package count and lock file hash,
+and every job). The PDF export prints the Decision screen, which carries the
+same decision, trail and provenance; the print stylesheet hides the rail, the
+trail panel and buttons.
 
 ## 10. Open questions
 

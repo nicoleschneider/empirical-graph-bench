@@ -117,7 +117,7 @@ export function StackedBar({ title, bars }: StackedBarProps) {
             return (
               <g key={bar.id}>
                 <title>
-                  {`${bar.label}: ETL ${seconds(bar.etl)}, processing ${seconds(bar.processing)}, end to end ${seconds(total)}`}
+                  {`${bar.label}: ETL ${seconds(bar.etl)}, processing ${seconds(bar.processing)}, end-to-end ${seconds(total)}`}
                 </title>
                 <text x={LABEL_WIDTH - 8} y={y + ROW / 2 + 4} textAnchor="end">
                   {bar.label}

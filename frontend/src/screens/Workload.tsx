@@ -14,7 +14,9 @@ type WorkloadProps = {
   registry: Registry;
   datasets: Resource<DatasetStatus[]>;
   selection: Selection;
+  sessionId: string | null;
   onChange: (selection: Selection) => void;
+  onNewSession: () => void;
 };
 
 type Row = { id: string; directed: boolean; vertices: number; edges: number; status: DatasetStatus };
@@ -26,7 +28,8 @@ function DatasetState({ status }: { status: DatasetStatus }) {
   return <StatusMark status="pending" word="Missing" />;
 }
 
-export function Workload({ registry, datasets, selection, onChange }: WorkloadProps) {
+export function Workload({ registry, datasets, selection, sessionId, onChange, onNewSession }: WorkloadProps) {
+  const locked = sessionId !== null;
   const [running, setRunning] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const statuses = datasets.data ?? [];
@@ -62,7 +65,7 @@ export function Workload({ registry, datasets, selection, onChange }: WorkloadPr
         <Checkbox
           label={row.id}
           checked={selection.datasets.includes(row.id)}
-          disabled={row.status.state === "missing"}
+          disabled={locked || row.status.state === "missing"}
           onChange={(on) => onChange({ ...selection, datasets: toggle(selection.datasets, row.id, on) })}
         />
       ),
@@ -116,6 +119,16 @@ export function Workload({ registry, datasets, selection, onChange }: WorkloadPr
   return (
     <>
       <PageHeader screenId="workload" title="Workload" />
+      {locked && (
+        <section className="section">
+          <div className="actions">
+            <span className="secondary">
+              Recorded in session <span className="mono">{sessionId}</span>.
+            </span>
+            <Button onClick={onNewSession}>New session</Button>
+          </div>
+        </section>
+      )}
       <section className="section" aria-labelledby="tasks-title">
         <div className="section-header">
           <h2 id="tasks-title">Tasks</h2>
@@ -130,6 +143,7 @@ export function Workload({ registry, datasets, selection, onChange }: WorkloadPr
                 .map((a) => a.name)
                 .join(", ")}
               checked={selection.tasks.includes(task.id)}
+              disabled={locked}
               onChange={(on) => onChange({ ...selection, tasks: toggle(selection.tasks, task.id, on) })}
             />
           ))}

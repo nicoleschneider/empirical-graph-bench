@@ -21,31 +21,37 @@ export const STEPS: Step[] = [
     index: 2,
     label: "Explore",
     question: "Which interactions suggest dominant bottlenecks or unexpected results?",
-    screens: [],
+    screens: [{ id: "explore", label: "Explore" }],
   },
   {
     index: 3,
     label: "Hypothesize",
     question: "Why these results? What would show we're wrong?",
-    screens: [],
+    screens: [{ id: "hypothesize", label: "Hypothesize" }],
   },
   {
     index: 4,
     label: "Design",
     question: "What configurations would isolate the hypothesized cause?",
-    screens: [],
+    screens: [{ id: "test", label: "Test" }],
   },
-  { index: 5, label: "Run", question: null, screens: [] },
+  { index: 5, label: "Run", question: null, screens: [{ id: "test", label: "Test" }] },
   {
     index: 6,
     label: "Compare",
     question: "Do observations match predictions? What explains results?",
-    screens: [],
+    screens: [{ id: "result", label: "Result" }],
   },
 ];
 
 export const LOOP_FIRST = 3;
 
-export function stepOf(screenId: string): Step | undefined {
-  return STEPS.find((step) => step.screens.some((screen) => screen.id === screenId));
+export const DECISION = {
+  id: "decision",
+  label: "Decision",
+  question: "Do we understand enough to make a configuration decision?",
+};
+
+export function stepsOf(screenId: string): Step[] {
+  return STEPS.filter((step) => step.screens.some((screen) => screen.id === screenId));
 }

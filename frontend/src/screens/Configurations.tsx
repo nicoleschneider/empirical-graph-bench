@@ -1,4 +1,5 @@
 import type { ConfigurationStatus, Hardware, Registry } from "../api";
+import { Button } from "../components/Button";
 import { Checkbox, NumberField } from "../components/Fields";
 import { N } from "../components/Num";
 import { StatusMark } from "../components/StatusMark";
@@ -13,6 +14,7 @@ type ConfigurationsProps = {
   hardware: Hardware[];
   configurations: ConfigurationStatus[];
   selection: Selection;
+  locked: boolean;
   onChange: (selection: Selection) => void;
 };
 
@@ -89,7 +91,7 @@ function HardwareFacts({ machine }: { machine: Hardware }) {
   );
 }
 
-export function Configurations({ registry, hardware, configurations, selection, onChange }: ConfigurationsProps) {
+export function Configurations({ registry, hardware, configurations, selection, locked, onChange }: ConfigurationsProps) {
   const machine = hardware[0];
   const rows = configurations.filter((c) => selection.tasks.includes(c.task));
   const chosen = rows.filter((c) => selection.configurations.includes(configurationKey(c.implementation, c.representation)));
@@ -111,7 +113,7 @@ export function Configurations({ registry, hardware, configurations, selection, 
               </>
             }
             checked={selected}
-            disabled={!row.runnable}
+            disabled={locked || !row.runnable}
             onChange={(on) =>
               onChange({
                 ...selection,
@@ -200,12 +202,18 @@ export function Configurations({ registry, hardware, configurations, selection, 
             </>
           }
           onChange={(repetitions) => onChange({ ...selection, repetitions })}
+          disabled={locked}
         />
         <p className="section-note" style={{ marginTop: "var(--space-3)" }}>
           <N>{count(runs)}</N> runs: <N>{chosen.length}</N> configurations, <N>{selection.datasets.length}</N> datasets,{" "}
           <N>{selection.repetitions}</N> each.
         </p>
       </section>
+      <div className="actions">
+        <Button primary onClick={() => (window.location.hash = "#/explore")}>
+          Continue
+        </Button>
+      </div>
     </>
   );
 }

@@ -7,14 +7,18 @@ export type Resource<T> = {
   reload: () => void;
 };
 
-export function useResource<T>(path: string): Resource<T> {
+export function useResource<T>(path: string | null, version = 0): Resource<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [version, setVersion] = useState(0);
-  const reload = useCallback(() => setVersion((v) => v + 1), []);
+  const [local, setLocal] = useState(0);
+  const reload = useCallback(() => setLocal((v) => v + 1), []);
 
   useEffect(() => {
     let active = true;
+    if (path === null) {
+      setData(null);
+      return;
+    }
     get<T>(path)
       .then((value) => {
         if (active) {
@@ -30,7 +34,7 @@ export function useResource<T>(path: string): Resource<T> {
     return () => {
       active = false;
     };
-  }, [path, version]);
+  }, [path, version, local]);
 
   return { data, error, reload };
 }

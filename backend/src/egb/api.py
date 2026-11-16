@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from egb.analysis import (
@@ -33,6 +33,7 @@ from egb.jobs import (
 )
 from egb.predictions import Evaluation, evaluate
 from egb.registry import KINDS, load_registry
+from egb.report import report
 from egb.results import cross_paths, job_specs, saved_outputs, session_rows
 from egb.runners import JobEvent, JobHandle, JobQueue, LocalRunner, git_state
 from egb.sessions import (
@@ -514,6 +515,25 @@ def create_app(settings: Settings) -> FastAPI:
         if not path.exists():
             raise HTTPException(404, f"No suggestion request {request_id}.")
         return SuggestionRecord.model_validate_json(path.read_text())
+
+    @app.get("/api/sessions/{session_id}/report.md")
+    def session_report(session_id: str) -> PlainTextResponse:
+        current = core.session(session_id)
+        folder = core.sessions.folder(session_id)
+        text = report(
+            folder,
+            current,
+            core.sessions.log(session_id),
+            core.analysis(session_id),
+            core.registry,
+            core.sessions.verify_log(session_id),
+            read_jsonl(folder / "jobs.jsonl"),
+        )
+        return PlainTextResponse(
+            text,
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="report-{session_id}.md"'},
+        )
 
     @app.get("/api/sessions/{session_id}/environment")
     def environment(session_id: str) -> dict[str, dict]:

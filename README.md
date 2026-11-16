@@ -7,7 +7,7 @@ and a configuration decision with its evidence. It runs the benchmark code
 from [HARD-graph-benchmark](https://github.com/nicoleschneider/HARD-graph-benchmark)
 (gaib) unchanged, as a pinned submodule.
 
-Status: backend core, analysis and the first two screens. See `docs/architecture.md` and `docs/design.md`.
+Status: one full iteration works end to end on the local machine. See `docs/architecture.md` and `docs/design.md`.
 
 ## Setup
 

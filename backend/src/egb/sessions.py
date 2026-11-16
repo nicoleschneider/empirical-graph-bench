@@ -122,6 +122,7 @@ class LogEntryInput(BaseModel):
     prediction: Prediction | None = None
     source: str = "user"
     suggestion: dict | None = None
+    details: dict | None = None
 
 
 class LogEntry(LogEntryInput):

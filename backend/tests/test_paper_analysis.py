@@ -83,7 +83,11 @@ def test_representation_change_for_gpu_pagerank(suggestions) -> None:
     assert suggestion.change.target == key(GPU, "pagerank-nx-cugraph", "cudf-float64")
     prediction = suggestion.predictions[0].prediction
     assert prediction.reference == key(MAC, "pagerank-networkx")
-    assert "4.87 s on web-Stanford" in suggestion.predictions[0].text
+    assert "web-Stanford" in prediction.datasets
+    assert suggestion.predictions[0].text == (
+        "nexus-2080ti-gpu PageRank: end-to-end time below "
+        "macbook-m5max-48gb PageRank medians on 5 datasets."
+    )
 
 
 def test_algorithm_change_for_cpu_louvain(suggestions) -> None:
@@ -96,10 +100,12 @@ def test_algorithm_change_for_cpu_louvain(suggestions) -> None:
     for hardware, suggestion in found.items():
         assert suggestion.change.source == key(hardware, "louvain-networkx")
         assert suggestion.change.target == key(hardware, "label-propagation-networkx")
-        assert [p.prediction.metric for p in suggestion.predictions] == [
-            "end_to_end_s",
-            "modularity",
-        ]
+        metrics = [p.prediction.metric for p in suggestion.predictions]
+        assert set(metrics) == {"end_to_end_s", "modularity"}
+        assert metrics[-1] == "modularity"
+    mac_time = found[MAC].predictions[0]
+    assert mac_time.prediction.reference == key(GPU, "louvain-nx-cugraph")
+    assert "email-Eu-core" in mac_time.prediction.datasets
 
 
 def test_louvain_tie_matches_paper(
