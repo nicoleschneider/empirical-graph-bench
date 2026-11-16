@@ -6,7 +6,7 @@ import { PredictionEditor, type PredictionDraftState } from "../components/Predi
 import { StatusMark } from "../components/StatusMark";
 import { PageHeader } from "../layout/PageHeader";
 import { keyName } from "../names";
-import { currentIteration, exploration, nextIterationNumber, type SessionData } from "../sessionState";
+import { currentIteration, explored, nextIterationNumber, type SessionData } from "../sessionState";
 
 type HypothesizeProps = {
   registry: Registry;
@@ -43,8 +43,7 @@ export function Hypothesize({ registry, data, summaries, onRefresh }: Hypothesiz
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const explored = data ? exploration(data) : null;
-  const ready = explored?.status === "finished";
+  const ready = data ? explored(data) : false;
   const current = data ? currentIteration(data) : null;
   const open = current && !current.outcome ? current : null;
   const number = data ? nextIterationNumber(data) : 1;

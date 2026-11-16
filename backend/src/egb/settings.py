@@ -16,6 +16,7 @@ class Settings:
     entries: tuple[Path, ...]
     poll_seconds: float
     analysis_config: Path
+    targets_file: Path
 
     @property
     def gaib_dir(self) -> Path:

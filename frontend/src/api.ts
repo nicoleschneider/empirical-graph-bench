@@ -37,8 +37,12 @@ export type Gpu = { name: string; driver: string; memory: string };
 export type Hardware = {
   id: string;
   label: string;
-  runner: string;
-  specs: {
+  runner: "local" | "ssh" | "local-shell";
+  host: string | null;
+  status: "reachable" | "checking" | "unavailable";
+  reason: string | null;
+  supports: string[] | null;
+  specs: null | {
     model: string | null;
     cpu: string;
     physical_cores: number | null;
@@ -55,6 +59,7 @@ export type Hardware = {
 };
 
 export type ConfigurationStatus = {
+  hardware: string;
   implementation: string;
   representation: string;
   algorithm: string;
@@ -66,7 +71,7 @@ export type ConfigurationStatus = {
 
 export type ConfigKey = { hardware: string; implementation: string; representation: string };
 
-export type Candidate = { id: string; implementation: string; representation: string; color_slot: number };
+export type Candidate = { id: string; hardware: string; implementation: string; representation: string; color_slot: number };
 
 export type SessionConfig = {
   tasks: string[];
@@ -115,11 +120,14 @@ export type JobItem = {
   gaib_task: string;
 };
 
+export type QueueView = { running: string | null; queued: string[] };
+
 export type JobSpec = {
   id: string;
   kind: string;
   hypothesis: string | null;
   baseline: string | null;
+  hardware: string;
   hardware_label: string;
   repetitions: number | null;
   datasets: string[];

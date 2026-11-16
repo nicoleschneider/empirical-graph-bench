@@ -10,7 +10,8 @@ import { count, gigabytes, seconds } from "../format";
 import { PageHeader } from "../layout/PageHeader";
 import { formatMetric } from "../components/PredictionEditor";
 import { keyId, keyName, metricName, sameKey, taskOf } from "../names";
-import { decision, exploration, iterations, type SessionData } from "../sessionState";
+import { slotFinder, useHardware } from "../hardwareContext";
+import { decision, explored, iterations, type SessionData } from "../sessionState";
 import { STATUS, STATUS_WORD } from "./Result";
 
 type DecisionProps = {
@@ -105,6 +106,7 @@ export function Decision({ registry, data, summaries, onRefresh }: DecisionProps
   const [environments, setEnvironments] = useState<Record<string, Snapshot>>({});
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const hardware = useHardware();
   const decided = data ? decision(data) : null;
   const sessionId = data?.session.meta.id;
   const logLength = data?.log.length ?? 0;
@@ -120,7 +122,7 @@ export function Decision({ registry, data, summaries, onRefresh }: DecisionProps
   }, [sessionId, logLength]);
 
   const header = <PageHeader screenId="decision" title="Decision" />;
-  if (!data || exploration(data)?.status !== "finished") {
+  if (!data || !explored(data)) {
     return (
       <>
         {header}
@@ -138,7 +140,7 @@ export function Decision({ registry, data, summaries, onRefresh }: DecisionProps
   const caveatText = (task: string) =>
     caveats[task] ?? caveatsFor(data, summaries, task, chosen(task)!, registry, hardwareCount).join("\n");
   const recordedChoices = (decided?.details?.choices as Choice[] | undefined) ?? [];
-  const slots = new Map(data.session.config.candidates.map((c) => [`${c.implementation}/${c.representation}`, c.color_slot]));
+  const slot = slotFinder(data.session, hardware);
 
   async function record() {
     setSaving(true);
@@ -187,7 +189,7 @@ export function Decision({ registry, data, summaries, onRefresh }: DecisionProps
                 label: "Configuration",
                 render: (c) => (
                   <>
-                    <Swatch slot={slots.get(`${c.config.implementation}/${c.config.representation}`) ?? 1} />
+                    <Swatch slot={slot(c.config.hardware, c.config.implementation, c.config.representation)} />
                     {keyName(registry, c.config, hardwareCount)}
                   </>
                 ),
@@ -230,7 +232,7 @@ export function Decision({ registry, data, summaries, onRefresh }: DecisionProps
                         type="radio"
                         label={
                           <>
-                            <Swatch slot={slots.get(`${c.implementation}/${c.representation}`) ?? 1} />
+                            <Swatch slot={slot(c.hardware, c.implementation, c.representation)} />
                             {keyName(registry, c, hardwareCount)}
                           </>
                         }

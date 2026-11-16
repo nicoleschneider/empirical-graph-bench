@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ConfigurationStatus, DatasetStatus, Hardware, JobView, LogEntry, Registry, Session, Summary } from "./api";
+import type {
+  ConfigurationStatus,
+  DatasetStatus,
+  Hardware,
+  JobView,
+  LogEntry,
+  QueueView,
+  Registry,
+  Session,
+  Summary,
+} from "./api";
+import { HardwareContext } from "./hardwareContext";
 import { StatusMark } from "./components/StatusMark";
 import { StepRail } from "./layout/StepRail";
 import { TrailPanel } from "./layout/TrailPanel";
@@ -25,11 +36,15 @@ function currentScreen(): string {
 function selectionOf(session: Session): Selection {
   const exploratory = session.config.candidates.filter((c) => session.config.exploratory.includes(c.id));
   return {
+    hardware: [...new Set(session.config.candidates.map((c) => c.hardware))],
     tasks: session.config.tasks,
     datasets: session.config.datasets,
-    configurations: exploratory.map((c) => configurationKey(c.implementation, c.representation)),
+    configurations: exploratory.map((c) => configurationKey(c.hardware, c.implementation, c.representation)),
     colors: Object.fromEntries(
-      session.config.candidates.map((c) => [configurationKey(c.implementation, c.representation), c.color_slot]),
+      session.config.candidates.map((c) => [
+        configurationKey(c.hardware, c.implementation, c.representation),
+        c.color_slot,
+      ]),
     ),
     repetitions: session.config.repetitions,
   };
@@ -44,6 +59,7 @@ export function App() {
   const datasets = useResource<DatasetStatus[]>("/datasets");
   const hardware = useResource<Hardware[]>("/hardware");
   const configurations = useResource<ConfigurationStatus[]>("/configurations");
+  const queues = useResource<Record<string, QueueView>>("/queue", version);
   const base = sessionId ? `/sessions/${sessionId}` : null;
   const session = useResource<Session>(base, version);
   const log = useResource<LogEntry[]>(base && `${base}/log`, version);
@@ -70,9 +86,10 @@ export function App() {
   useEffect(() => {
     if (selection || !registry.data || !datasets.data || !configurations.data) return;
     const runnable = configurations.data
-      .filter((c) => c.runnable)
-      .map((c) => configurationKey(c.implementation, c.representation));
+      .filter((c) => c.runnable && c.hardware === "local")
+      .map((c) => configurationKey(c.hardware, c.implementation, c.representation));
     setSelection({
+      hardware: ["local"],
       tasks: Object.keys(registry.data.tasks),
       datasets: datasets.data.filter((d) => d.state === "verified").map((d) => d.id),
       configurations: runnable,
@@ -100,9 +117,14 @@ export function App() {
         registry={registry.data}
         hardware={hardware.data}
         configurations={configurations.data}
+        queues={queues.data ?? {}}
         selection={active}
         locked={data !== null}
         onChange={setSelection}
+        onProbed={() => {
+          hardware.reload();
+          configurations.reload();
+        }}
       />
     );
   } else if (screen === "explore") {
@@ -140,10 +162,12 @@ export function App() {
   }
 
   return (
-    <div className="shell">
-      <StepRail screenId={screen} />
-      <main className="main">{body}</main>
-      <TrailPanel registry={registry.data} data={data} />
-    </div>
+    <HardwareContext.Provider value={hardware.data ?? []}>
+      <div className="shell">
+        <StepRail screenId={screen} />
+        <main className="main">{body}</main>
+        <TrailPanel registry={registry.data} data={data} />
+      </div>
+    </HardwareContext.Provider>
   );
 }

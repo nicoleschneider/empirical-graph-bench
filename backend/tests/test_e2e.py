@@ -71,6 +71,8 @@ def client(
             str(data_dir),
             "--sessions-dir",
             str(sessions),
+            "--targets",
+            str(sessions / "no-targets.yaml"),
             "serve",
             "--port",
             str(port),
@@ -144,8 +146,8 @@ def finished_job(client: httpx.Client) -> dict:
         json={"configurations": ["c1", "c2"], "datasets": ["email-Eu-core"], "kind": "exploratory"},
     )
     assert job.status_code == 202, job.text
-    stream = events(client, job.json()["id"])
-    return {"session_id": session_id, "spec": job.json(), "events": stream}
+    stream = events(client, job.json()[0]["id"])
+    return {"session_id": session_id, "spec": job.json()[0], "events": stream}
 
 
 def comparable(row: dict) -> dict:
@@ -161,7 +163,7 @@ def same_l1(a: str, b: str) -> bool:
 def test_gpu_configurations_report_reason(client: httpx.Client) -> None:
     hardware = client.get("/api/hardware").json()[0]
     statuses = client.get("/api/configurations").json()
-    blocked = [s for s in statuses if not s["runnable"]]
+    blocked = [s for s in statuses if not s["runnable"] and s["hardware"] == "local"]
     if "cuda" in hardware["capabilities"]:
         pytest.skip("This machine has CUDA; nothing to report as blocked.")
     assert {(s["implementation"], s["representation"]) for s in blocked} == {
@@ -324,13 +326,13 @@ def test_targeted_job_validity_and_evaluation(client: httpx.Client, finished_job
         },
     )
     assert job.status_code == 202, job.text
-    assert events(client, job.json()["id"])[-1]["type"] == "finished"
+    assert events(client, job.json()[0]["id"])[-1]["type"] == "finished"
     evaluation = client.post(
         f"/api/sessions/{session_id}/log/{prediction.json()['id']}/evaluate"
     ).json()
     assert evaluation["status"] in {"held", "refuted", "narrow"}
     assert evaluation["datasets"][0]["ratio"]["resamples"] == 10000
-    validity = client.get(f"/api/jobs/{job.json()['id']}/validity")
+    validity = client.get(f"/api/jobs/{job.json()[0]['id']}/validity")
     assert validity.status_code == 200, validity.text
     result = validity.json()[0]
     assert result["source"] == "saved_outputs"

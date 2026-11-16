@@ -9,9 +9,10 @@ import { Swatch } from "../components/Swatch";
 import { Table, type Column } from "../components/Table";
 import { count, decimal, quality, scientific, seconds, share } from "../format";
 import { PageHeader } from "../layout/PageHeader";
-import { configName, keyName, runDescription } from "../names";
-import { exploration, type SessionData } from "../sessionState";
-import type { Selection } from "../selection";
+import { keyName, runDescription } from "../names";
+import { slotFinder, useHardware } from "../hardwareContext";
+import { explorations, type SessionData } from "../sessionState";
+import { splitKey, type Selection } from "../selection";
 
 type ExploreProps = {
   registry: Registry;
@@ -30,10 +31,7 @@ function sessionBody(registry: Registry, selection: Selection) {
     config: {
       tasks: selection.tasks,
       datasets: selection.datasets,
-      candidates: ordered.map((key) => {
-        const [implementation, representation] = key.split("/");
-        return { implementation, representation, exploratory: true };
-      }),
+      candidates: ordered.map((key) => ({ ...splitKey(key), exploratory: true })),
       metrics: Object.values(registry.metrics)
         .filter((m) => m.tasks.some((t) => selection.tasks.includes(t)))
         .map((m) => m.id),
@@ -45,11 +43,9 @@ function sessionBody(registry: Registry, selection: Selection) {
 export function Explore({ registry, selection, data, summaries, onSession, onRefresh }: ExploreProps) {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const job = data ? exploration(data) : null;
+  const jobs = data ? explorations(data) : [];
   const total = selection.configurations.length * selection.datasets.length * selection.repetitions;
-  const slots = new Map(
-    (data?.session.config.candidates ?? []).map((c) => [`${c.implementation}/${c.representation}`, c.color_slot]),
-  );
+  const slot = slotFinder(data?.session, useHardware());
   const hardwareCount = new Set(summaries.map((s) => s.config.hardware)).size;
 
   async function start() {
@@ -58,7 +54,7 @@ export function Explore({ registry, selection, data, summaries, onSession, onRef
     try {
       const session = data?.session ?? (await post<Session>("/sessions", sessionBody(registry, selection)));
       onSession(session.meta.id);
-      await post<JobSpec>(`/sessions/${session.meta.id}/jobs`, {
+      await post<JobSpec[]>(`/sessions/${session.meta.id}/jobs`, {
         configurations: session.config.candidates.map((c) => c.id),
         datasets: session.config.datasets,
         kind: "exploratory",
@@ -77,7 +73,7 @@ export function Explore({ registry, selection, data, summaries, onSession, onRef
       label: "Configuration",
       render: (s) => (
         <>
-          <Swatch slot={slots.get(`${s.config.implementation}/${s.config.representation}`) ?? 1} />
+          <Swatch slot={slot(s.config.hardware, s.config.implementation, s.config.representation)} />
           {keyName(registry, s.config, hardwareCount)}
         </>
       ),
@@ -138,7 +134,7 @@ export function Explore({ registry, selection, data, summaries, onSession, onRef
   return (
     <>
       <PageHeader screenId="explore" title="Initial experiments" />
-      {!job ? (
+      {jobs.length === 0 ? (
         <section className="section">
           <p className="section-note">
             <N>{count(total)}</N> runs: <N>{selection.configurations.length}</N> configurations,{" "}
@@ -158,12 +154,17 @@ export function Explore({ registry, selection, data, summaries, onSession, onRef
           <div className="section-header">
             <h2>Progress</h2>
           </div>
-          <JobProgress
-            jobId={job.spec.id}
-            total={job.spec.items.length * (job.spec.repetitions ?? 1)}
-            describe={(row) => runDescription(registry, row)}
-            onEnd={onRefresh}
-          />
+          {jobs.map((job) => (
+            <div key={job.spec.id} className="subsection">
+              <h3 className="mono">{job.spec.hardware_label}</h3>
+              <JobProgress
+                jobId={job.spec.id}
+                total={job.spec.items.length * (job.spec.repetitions ?? 1)}
+                describe={(row) => runDescription(registry, row)}
+                onEnd={onRefresh}
+              />
+            </div>
+          ))}
         </section>
       )}
       {summaries.length > 0 && (
@@ -181,8 +182,8 @@ export function Explore({ registry, selection, data, summaries, onSession, onRef
                     .filter((s) => s.dataset === dataset)
                     .map((s) => ({
                       id: `${s.config.implementation}-${s.config.representation}-${dataset}`,
-                      label: configName(registry, s.config.implementation, s.config.representation),
-                      slot: slots.get(`${s.config.implementation}/${s.config.representation}`) ?? 1,
+                      label: keyName(registry, s.config, hardwareCount),
+                      slot: slot(s.config.hardware, s.config.implementation, s.config.representation),
                       etl: s.etl_s.median,
                       processing: s.processing_s.median,
                     }))}

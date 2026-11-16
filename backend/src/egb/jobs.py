@@ -1,7 +1,8 @@
 import datetime
 import json
 import secrets
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePath
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -48,6 +49,7 @@ class JobSpec(BaseModel):
     kind: Literal["exploratory", "targeted", "download", "properties"]
     hypothesis: str | None
     baseline: str | None = None
+    hardware: str = "local"
     hardware_label: str
     repetitions: int | None
     base_seed: int | None
@@ -64,6 +66,7 @@ class JobSpec(BaseModel):
 
 
 class ConfigurationStatus(BaseModel):
+    hardware: str
     implementation: str
     representation: str
     algorithm: str
@@ -80,6 +83,10 @@ def new_job_id() -> str:
 def blockers(
     registry: Registry, hardware: Hardware, implementation: str, representation: str
 ) -> list[str]:
+    if hardware.status != "reachable":
+        return [hardware.reason or "Not reachable."]
+    if hardware.supports is not None and implementation not in hardware.supports:
+        return ["Not in this target's supports list."]
     needed = ["cpu"] + registry.requirements(implementation, representation)
     missing = [c for c in needed if c not in hardware.capabilities]
     if not missing:
@@ -99,6 +106,7 @@ def configuration_statuses(registry: Registry, hardware: Hardware) -> list[Confi
             reasons = blockers(registry, hardware, implementation.id, variant.representation)
             statuses.append(
                 ConfigurationStatus(
+                    hardware=hardware.id,
                     implementation=implementation.id,
                     representation=variant.representation,
                     algorithm=implementation.algorithm,
@@ -121,12 +129,17 @@ def hypothesis_errors(hypothesis: str | None, log: list[LogEntry]) -> list[str]:
     return []
 
 
-def work_dir(job_dir: Path) -> Path:
+def work_dir(job_dir: PurePath) -> PurePath:
     return job_dir / "work" / "cwd"
 
 
 def write_definition(
-    path: Path, source: Path, ground_truth: Path | None, task: str, directed: bool, gpu: bool
+    path: Path,
+    source: PurePath,
+    ground_truth: PurePath | None,
+    task: str,
+    directed: bool,
+    gpu: bool,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -147,14 +160,34 @@ def write_definition(
     )
 
 
-def runner_invocation(
-    settings: Settings, job_dir: Path, label: str, repetitions: int, base_seed: int
-) -> Invocation:
+@dataclass(frozen=True)
+class RunPaths:
+    bench_python: PurePath
+    gaib_dir: PurePath
+    datasets: PurePath
+    manifest: PurePath
+    pagerank_references: PurePath
+    job_dir: PurePath
+
+
+def local_paths(settings: Settings, job_dir: Path) -> RunPaths:
+    return RunPaths(
+        bench_python=settings.bench_python,
+        gaib_dir=settings.gaib_dir,
+        datasets=settings.datasets_dir,
+        manifest=settings.manifest,
+        pagerank_references=settings.pagerank_references,
+        job_dir=job_dir,
+    )
+
+
+def runner_invocation(paths: RunPaths, label: str, repetitions: int, base_seed: int) -> Invocation:
+    job_dir = paths.job_dir
     return Invocation(
         driver="gaib-runner",
         argv=[
-            str(settings.bench_python),
-            str(settings.gaib_dir / "runner.py"),
+            str(paths.bench_python),
+            str(paths.gaib_dir / "runner.py"),
             "--hardware",
             label,
             "--definitions",
@@ -168,7 +201,7 @@ def runner_invocation(
             "--base-seed",
             str(base_seed),
             "--pagerank-reference-directory",
-            str(settings.pagerank_references),
+            str(paths.pagerank_references),
         ],
         cwd=str(work_dir(job_dir)),
         env={},
@@ -177,19 +210,19 @@ def runner_invocation(
 
 
 def representation_invocation(
-    settings: Settings,
-    job_dir: Path,
+    paths: RunPaths,
     label: str,
     repetitions: int,
     base_seed: int,
-    graphs: list[Path],
+    graphs: list[PurePath],
     script_task: str,
     dtype: str,
     undirected: bool,
 ) -> Invocation:
+    job_dir = paths.job_dir
     argv = [
-        str(settings.bench_python),
-        str(settings.gaib_dir / "iterations" / "representation_test.py"),
+        str(paths.bench_python),
+        str(paths.gaib_dir / "iterations" / "representation_test.py"),
         *[str(g) for g in graphs],
         "--task",
         script_task,
@@ -204,9 +237,9 @@ def representation_invocation(
         "--base-seed",
         str(base_seed),
         "--manifest",
-        str(settings.manifest),
+        str(paths.manifest),
         "--pagerank-reference-directory",
-        str(settings.pagerank_references),
+        str(paths.pagerank_references),
     ]
     if undirected:
         argv.append("--undirected")
@@ -214,7 +247,7 @@ def representation_invocation(
         driver="gaib-representation-test",
         argv=argv,
         cwd=str(work_dir(job_dir)),
-        env={"PYTHONPATH": str(settings.gaib_dir)},
+        env={"PYTHONPATH": str(paths.gaib_dir)},
         results_csv=str(job_dir / "results.csv"),
     )
 
@@ -225,8 +258,8 @@ def resolve_session_job(
     log: list[LogEntry],
     registry: Registry,
     hardware: Hardware,
-    datasets: DatasetStore,
-    settings: Settings,
+    datasets: DatasetStore | None,
+    paths: RunPaths,
     job_id: str,
     job_dir: Path,
 ) -> JobSpec:
@@ -251,7 +284,10 @@ def resolve_session_job(
                 registry, hardware, candidate.implementation, candidate.representation
             )
         ]
-    for dataset_id in request.datasets:
+    for configuration_id in request.configurations:
+        if config.candidate(configuration_id).hardware != hardware.id:
+            errors.append(f"{configuration_id} is not on {hardware.id}.")
+    for dataset_id in request.datasets if datasets is not None else []:
         if datasets.status(registry.datasets[dataset_id], compute=False).state == "missing":
             errors.append(f"{dataset_id} is not downloaded.")
     if errors:
@@ -281,11 +317,12 @@ def resolve_session_job(
                     results_dataset=dataset.results_name,
                 )
             )
-            graph = datasets.graph_path(dataset).resolve()
+            folder = paths.datasets / dataset.directory
+            graph = folder / dataset.graph.file
             if variant.driver == "gaib-runner":
                 ground_truth = (
-                    datasets.ground_truth_path(dataset)
-                    if algorithm.task == "community-detection"
+                    folder / dataset.ground_truth.file
+                    if algorithm.task == "community-detection" and dataset.ground_truth is not None
                     else None
                 )
                 write_definition(
@@ -293,7 +330,7 @@ def resolve_session_job(
                     / "definitions"
                     / f"{len(items):03d}_{dataset.results_name}_{variant.gaib_task}.json",
                     graph,
-                    None if ground_truth is None else ground_truth.resolve(),
+                    ground_truth,
                     variant.definition_task,
                     directed,
                     variant.gpu,
@@ -305,15 +342,12 @@ def resolve_session_job(
                     graph
                 )
     invocations = (
-        [runner_invocation(settings, job_dir, hardware.label, repetitions, base_seed)]
-        if uses_runner
-        else []
+        [runner_invocation(paths, hardware.label, repetitions, base_seed)] if uses_runner else []
     )
     for (script_task, dtype, undirected), graphs in script_groups.items():
         invocations.append(
             representation_invocation(
-                settings,
-                job_dir,
+                paths,
                 hardware.label,
                 repetitions,
                 base_seed,
@@ -329,6 +363,7 @@ def resolve_session_job(
         kind=request.kind,
         hypothesis=request.hypothesis,
         baseline=request.baseline,
+        hardware=hardware.id,
         hardware_label=hardware.label,
         repetitions=repetitions,
         base_seed=base_seed,

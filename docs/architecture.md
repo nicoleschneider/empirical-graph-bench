@@ -318,13 +318,9 @@ to no configuration logs a warning. On success the `work/` folder is
 deleted. Cancelling sends SIGTERM to the process group; partial rows stay
 and the job is marked cancelled.
 
-**RemoteRunner (later).** Same interface. The SSH variant copies the job
-folder to a remote scratch directory, runs the same gaib scripts in a remote
-benchmark environment built from the same lock file, and copies the job
-folder back. The Slurm variant submits them with `sbatch`, as
-`gaib/hard-bench.sh` does, polls `squeue` and `sacct`, and copies back on
-completion. Neither needs a UI change: the UI shows jobs, events and
-results the same way.
+**RemoteRunner (proposed).** Same interface, over SSH to machines declared
+in a targets file. No scheduler integration. The design is in
+`docs/remote.md`.
 
 ## 5. Analysis and hypothesis suggestions
 

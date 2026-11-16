@@ -2,18 +2,20 @@ import type { Registry } from "../api";
 import { StatusMark, type Status } from "../components/StatusMark";
 import { Swatch } from "../components/Swatch";
 import { taskOf } from "../names";
-import { decision, exploration, iterations, type SessionData } from "../sessionState";
+import { slotFinder, useHardware } from "../hardwareContext";
+import { decision, explorations, iterations, type SessionData } from "../sessionState";
 
 type Cell = { key: string; label: string; slot: number; status?: Status; chosen?: boolean };
 
 const STATUS: Record<string, Status> = { held: "met", refuted: "refuted", narrow: "tie", pending: "pending" };
 
 export function Swimlane({ registry, data }: { registry: Registry; data: SessionData | null }) {
-  const explored = data ? exploration(data) : null;
-  if (!data || !explored) {
+  const hardware = useHardware();
+  const explored = data ? explorations(data) : [];
+  if (!data || explored.length === 0) {
     return <p className="empty">Run the initial experiments to start the trail.</p>;
   }
-  const slots = new Map(data.session.config.candidates.map((c) => [`${c.implementation}/${c.representation}`, c.color_slot]));
+  const slot = slotFinder(data.session, hardware);
   const lanes = new Map<string, { task: string; hardware: string }>();
   const cells = new Map<string, Cell[]>();
   const add = (task: string, hardware: string, column: string, cell: Cell) => {
@@ -23,15 +25,26 @@ export function Swimlane({ registry, data }: { registry: Registry; data: Session
     const list = cells.get(key) ?? [];
     if (!list.some((c) => c.key === cell.key)) cells.set(key, [...list, cell]);
   };
-  const cellFor = (implementation: string, representation: string): Cell => {
+  const cellFor = (hardwareLabel: string, implementation: string, representation: string): Cell => {
     const entry = registry.implementations[implementation];
     const algorithm = registry.algorithms[entry.algorithm].name;
     const label = entry.variants.length > 1 ? `${algorithm}, ${registry.representations[representation].name}` : algorithm;
-    return { key: `${implementation}/${representation}`, label, slot: slots.get(`${implementation}/${representation}`) ?? 1 };
+    return {
+      key: `${implementation}/${representation}`,
+      label,
+      slot: slot(hardwareLabel, implementation, representation),
+    };
   };
 
-  for (const item of explored.spec.items) {
-    add(taskOf(registry, item.implementation), explored.spec.hardware_label, "0", cellFor(item.implementation, item.representation));
+  for (const job of explored) {
+    for (const item of job.spec.items) {
+      add(
+        taskOf(registry, item.implementation),
+        job.spec.hardware_label,
+        "0",
+        cellFor(job.spec.hardware_label, item.implementation, item.representation),
+      );
+    }
   }
   const all = iterations(data);
   for (const iteration of all) {
@@ -39,16 +52,19 @@ export function Swimlane({ registry, data }: { registry: Registry; data: Session
     const target = iteration.hypothesis?.suggestion?.change as { target?: { hardware: string; implementation: string; representation: string } } | undefined;
     const config = iteration.job?.spec.items[0] ?? target?.target;
     if (!config) continue;
-    const hardware = iteration.job?.spec.hardware_label ?? target?.target?.hardware ?? "";
-    add(taskOf(registry, config.implementation), hardware, String(iteration.number), {
-      ...cellFor(config.implementation, config.representation),
+    const machine = iteration.job?.spec.hardware_label ?? target?.target?.hardware ?? "";
+    add(taskOf(registry, config.implementation), machine, String(iteration.number), {
+      ...cellFor(machine, config.implementation, config.representation),
       status: STATUS[status] ?? "pending",
     });
   }
   const decided = decision(data);
   const choices = ((decided?.details?.choices as { task: string; config: { hardware: string; implementation: string; representation: string } }[] | undefined) ?? []);
   for (const choice of choices) {
-    add(choice.task, choice.config.hardware, "chosen", { ...cellFor(choice.config.implementation, choice.config.representation), chosen: true });
+    add(choice.task, choice.config.hardware, "chosen", {
+      ...cellFor(choice.config.hardware, choice.config.implementation, choice.config.representation),
+      chosen: true,
+    });
   }
 
   const columns = ["0", ...all.map((i) => String(i.number)), ...(choices.length ? ["chosen"] : [])];

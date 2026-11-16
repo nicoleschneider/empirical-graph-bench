@@ -17,8 +17,8 @@ type StackedBarProps = {
   bars: PhaseBar[];
 };
 
-const WIDTH = 720;
-const LABEL_WIDTH = 220;
+const WIDTH = 800;
+const LABEL_WIDTH = 300;
 const VALUE_WIDTH = 150;
 const ROW = 20;
 const GAP = 12;
@@ -117,7 +117,7 @@ export function StackedBar({ title, bars }: StackedBarProps) {
             return (
               <g key={bar.id}>
                 <title>
-                  {`${bar.label}: ETL ${seconds(bar.etl)}, processing ${seconds(bar.processing)}, end-to-end ${seconds(total)}`}
+                  {`${bar.label}: ETL ${seconds(bar.etl)}, processing ${seconds(bar.processing)}`}
                 </title>
                 <text x={LABEL_WIDTH - 8} y={y + ROW / 2 + 4} textAnchor="end">
                   {bar.label}

@@ -4,8 +4,8 @@ from pathlib import Path
 from egb.datasets import coerce
 from egb.jobs import JobSpec
 from egb.registry import Registry
-from egb.runners import read_rows
 from egb.validity import CrossPath, SavedOutput, read_cross_paths
+from egb.worker import read_rows
 
 
 def job_specs(session_dir: Path) -> list[JobSpec]:

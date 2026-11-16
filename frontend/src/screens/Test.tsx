@@ -4,6 +4,7 @@ import {
   post,
   send,
   type ConfigKey,
+  type Hardware,
   type JobSpec,
   type Registry,
   type SessionConfig,
@@ -17,6 +18,7 @@ import { StatusMark } from "../components/StatusMark";
 import { Table } from "../components/Table";
 import { count, quality } from "../format";
 import { PageHeader } from "../layout/PageHeader";
+import { idOf, labelOf, useHardware } from "../hardwareContext";
 import { runDescription } from "../names";
 import { currentIteration, type SessionData } from "../sessionState";
 
@@ -50,8 +52,13 @@ function settings(registry: Registry, baseline: ConfigKey, targeted: ConfigKey) 
   ];
 }
 
-function candidateId(config: SessionConfig, key: ConfigKey): string | undefined {
-  return config.candidates.find((c) => c.implementation === key.implementation && c.representation === key.representation)?.id;
+function candidateId(config: SessionConfig, key: ConfigKey, hardware: Hardware[]): string | undefined {
+  return config.candidates.find(
+    (c) =>
+      c.implementation === key.implementation &&
+      c.representation === key.representation &&
+      labelOf(hardware, c.hardware) === key.hardware,
+  )?.id;
 }
 
 function checkValue(value: number | boolean | null): string {
@@ -75,6 +82,7 @@ export function Test({ registry, data, onRefresh }: TestProps) {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [validity, setValidity] = useState<ValidityResult[] | null>(null);
+  const hardware = useHardware();
   const current = data ? currentIteration(data) : null;
   const open = current && current.hypothesis ? current : null;
   const change = open?.hypothesis?.suggestion?.change as { source: ConfigKey | null; target: ConfigKey | null } | undefined;
@@ -110,29 +118,35 @@ export function Test({ registry, data, onRefresh }: TestProps) {
     setStarting(true);
     try {
       let config = session.config;
-      if (!candidateId(config, target!)) {
+      if (!candidateId(config, target!, hardware)) {
         config = await send<SessionConfig>("PATCH", `/sessions/${session.meta.id}/config`, {
           tasks: config.tasks,
           datasets: config.datasets,
           candidates: [
             ...config.candidates.map((c) => ({
+              hardware: c.hardware,
               implementation: c.implementation,
               representation: c.representation,
               exploratory: config.exploratory.includes(c.id),
             })),
-            { implementation: target!.implementation, representation: target!.representation, exploratory: false },
+            {
+              hardware: idOf(hardware, target!.hardware),
+              implementation: target!.implementation,
+              representation: target!.representation,
+              exploratory: false,
+            },
           ],
           metrics: config.metrics,
           repetitions: config.repetitions,
           base_seed: config.base_seed,
         });
       }
-      await post<JobSpec>(`/sessions/${session.meta.id}/jobs`, {
-        configurations: [candidateId(config, target!)],
+      await post<JobSpec[]>(`/sessions/${session.meta.id}/jobs`, {
+        configurations: [candidateId(config, target!, hardware)],
         datasets,
         kind: "targeted",
         hypothesis: open!.hypothesis!.id,
-        baseline: candidateId(config, source!),
+        baseline: candidateId(config, source!, hardware),
       });
       onRefresh();
     } catch (reason) {

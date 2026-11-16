@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from egb.datasets import sha256
+from egb.hardware import LOCAL_ID
 from egb.predictions import Prediction
 from egb.registry import Registry
 
@@ -57,6 +58,7 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 class ConfigurationInput(BaseModel):
+    hardware: str = LOCAL_ID
     implementation: str
     representation: str
     exploratory: bool = False
@@ -64,6 +66,7 @@ class ConfigurationInput(BaseModel):
 
 class Configuration(BaseModel):
     id: str
+    hardware: str = LOCAL_ID
     implementation: str
     representation: str
     color_slot: int
@@ -145,10 +148,11 @@ def config_errors(config: ConfigInput, registry: Registry) -> list[str]:
     errors += [f"Unknown dataset {d}." for d in config.datasets if d not in registry.datasets]
     seen = set()
     for candidate in config.candidates:
-        key = (candidate.implementation, candidate.representation)
+        key = (candidate.hardware, candidate.implementation, candidate.representation)
         if key in seen:
             errors.append(
-                f"{candidate.implementation} with {candidate.representation} is listed twice."
+                f"{candidate.implementation} with {candidate.representation} on {candidate.hardware} "
+                "is listed twice."
             )
         seen.add(key)
         if candidate.implementation not in registry.implementations:
@@ -169,15 +173,16 @@ def config_errors(config: ConfigInput, registry: Registry) -> list[str]:
 
 
 def build_config(config: ConfigInput, previous: list[Configuration]) -> SessionConfig:
-    known = {(c.implementation, c.representation): c for c in previous}
+    known = {(c.hardware, c.implementation, c.representation): c for c in previous}
     next_number = max((int(c.id[1:]) for c in previous), default=0) + 1
     next_slot = max((c.color_slot for c in previous), default=0) + 1
     candidates, exploratory = [], []
     for item in config.candidates:
-        existing = known.get((item.implementation, item.representation))
+        existing = known.get((item.hardware, item.implementation, item.representation))
         if existing is None:
             existing = Configuration(
                 id=f"c{next_number}",
+                hardware=item.hardware,
                 implementation=item.implementation,
                 representation=item.representation,
                 color_slot=next_slot,

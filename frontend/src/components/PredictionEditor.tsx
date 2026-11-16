@@ -103,7 +103,7 @@ export function PredictionEditor(props: PredictionEditorProps) {
           </select>
         </div>
         <div className="field">
-          <label htmlFor={`${id}-threshold`}>Threshold</label>
+          <label htmlFor={`${id}-threshold`}>Compared with</label>
           <select
             id={`${id}-threshold`}
             value={prediction.reference ? keyId(prediction.reference) : "value"}
@@ -119,10 +119,10 @@ export function PredictionEditor(props: PredictionEditorProps) {
           >
             {references.map((c) => (
               <option key={keyId(c)} value={keyId(c)}>
-                {keyName(registry, c, hardwareCount)} median
+                {keyName(registry, c, hardwareCount)}
               </option>
             ))}
-            <option value="value">Fixed value</option>
+            <option value="value">A fixed value</option>
           </select>
         </div>
         {prediction.reference === null && (

@@ -61,8 +61,13 @@ export function nextIterationNumber(data: SessionData): number {
   return current.outcome ? current.number + 1 : current.number;
 }
 
-export function exploration(data: SessionData): JobView | null {
-  return [...data.jobs].reverse().find((j) => j.spec.kind === "exploratory") ?? null;
+export function explorations(data: SessionData): JobView[] {
+  return data.jobs.filter((j) => j.spec.kind === "exploratory");
+}
+
+export function explored(data: SessionData): boolean {
+  const jobs = explorations(data);
+  return jobs.length > 0 && jobs.every((j) => j.status === "finished");
 }
 
 export function decision(data: SessionData): LogEntry | null {

@@ -1,30 +1,38 @@
 import asyncio
-import csv
 import hashlib
 import json
 import logging
 import os
-import re
 import shutil
 import signal
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel
 
+from egb import worker
 from egb.datasets import DatasetStore, sha256
 from egb.hardware import Hardware
 from egb.jobs import Invocation, JobSpec
+from egb.machine import git_state
 from egb.registry import Registry
 from egb.sessions import canonical, now
 from egb.settings import Settings
 
 PROBE = Path(__file__).with_name("probe.py")
-STATUS_EVENTS = {"queued", "started", "finished", "failed", "cancelled"}
+STATUS_EVENTS = {
+    "queued",
+    "started",
+    "waiting",
+    "running",
+    "finished",
+    "failed",
+    "cancelled",
+    "lost",
+}
+DONE = {"finished", "failed", "cancelled", "lost"}
 TAIL_LINES = 20
-CACHE_STAMP = re.compile(r"_(\d{4}-\d{2}-\d{2}T[\d.-]+)\.txt$")
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +51,13 @@ class JobHandle:
         job_dir: Path,
         environment_dir: Path | None,
         record: Callable[[dict], None],
+        resumed: bool = False,
     ):
         self.spec = spec
         self.job_dir = job_dir
         self.environment_dir = environment_dir
         self.record = record
+        self.resumed = resumed
         self.status = "new"
         self.events: list[JobEvent] = []
         self.changed = asyncio.Condition()
@@ -56,7 +66,7 @@ class JobHandle:
 
     @property
     def done(self) -> bool:
-        return self.status in {"finished", "failed", "cancelled"}
+        return self.status in DONE
 
     async def emit(self, event_type: str, **data) -> None:
         event = JobEvent(seq=len(self.events), type=event_type, at=now(), data=data)
@@ -76,81 +86,60 @@ class Runner(Protocol):
     async def cancel(self, handle: JobHandle) -> None: ...
 
 
-def git_state(path: Path) -> dict:
-    commit = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "HEAD"], check=False, capture_output=True, text=True
-    )
-    status = subprocess.run(
-        ["git", "-C", str(path), "status", "--porcelain"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return {"commit": commit.stdout.strip() or None, "dirty": bool(status.stdout.strip())}
-
-
-def read_rows(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    with path.open(newline="") as f:
-        return list(csv.DictReader(f))
-
-
 def log_tail(path: Path) -> list[str]:
     if not path.exists():
         return []
     return path.read_text(errors="replace").splitlines()[-TAIL_LINES:]
 
 
-def cache_stamp(path: Path) -> str:
-    return CACHE_STAMP.search(path.name).group(1)
+def store_environment(handle: JobHandle, snapshot: dict) -> str:
+    digest = hashlib.sha256(canonical(snapshot)).hexdigest()
+    text = json.dumps(snapshot, indent=2)
+    (handle.job_dir / "environment.json").write_text(text)
+    if handle.environment_dir is not None:
+        target = handle.environment_dir / f"{digest}.json"
+        if not target.exists():
+            target.write_text(text)
+    return digest
 
 
-def keep_first_outputs(
-    handle: JobHandle, results: Path, rows_before: int, files: list[Path]
-) -> None:
-    rows = read_rows(results)[rows_before:]
-    if len(files) != len(rows):
-        logger.warning(
-            "Job %s: %d gaib cache files for %d runs; outputs not kept",
-            handle.spec.id,
-            len(files),
-            len(rows),
-        )
-        return
+async def report_rows(handle: JobHandle, rows: list[dict], seen: int) -> int:
+    for index, row in enumerate(rows[seen:], start=seen):
+        configuration = handle.spec.configuration_of(row["task"], row["dataset"])
+        if configuration is None:
+            logger.warning("Row %d matches no configuration in job %s", index, handle.spec.id)
+        await handle.emit("run_completed", configuration=configuration, row=row)
+    return len(rows)
+
+
+def index_outputs(handle: JobHandle, kept: list[dict]) -> None:
     items = {(i.gaib_task, i.results_dataset): i for i in handle.spec.items}
     folder = handle.job_dir / "outputs"
     index_path = folder / "index.json"
-    folder.mkdir(exist_ok=True)
     index = json.loads(index_path.read_text()) if index_path.exists() else []
-    for path, row in zip(files, rows):
-        if path.name[: CACHE_STAMP.search(path.name).start()] != row["task"]:
-            logger.warning(
-                "Job %s: cache file %s does not match task %s; outputs not kept",
-                handle.spec.id,
-                path.name,
-                row["task"],
-            )
-            return
-    for path, row in zip(files, rows):
-        if row["run_index"] != "0":
-            continue
-        item = items[(row["task"], row["dataset"])]
-        target = folder / f"{row['task']}_{row['dataset']}_seed{row['seed']}.txt"
-        shutil.copyfile(path, target)
+    for entry in kept:
+        item = items[(entry["gaib_task"], entry["dataset"])]
         index.append(
             {
                 "config": {
-                    "hardware": row["hardware"],
+                    "hardware": entry["hardware"],
                     "implementation": item.implementation,
                     "representation": item.representation,
                 },
                 "dataset": item.dataset,
-                "seed": int(row["seed"]),
-                "path": str(target),
+                "seed": entry["seed"],
+                "path": str(folder / entry["file"]),
             }
         )
     index_path.write_text(json.dumps(index, indent=2))
+
+
+async def acquire_machine_lock(handle: JobHandle):
+    lock = worker.open_lock()
+    if not worker.try_lock(lock):
+        await handle.emit("waiting")
+        await asyncio.to_thread(worker.lock, lock)
+    return lock
 
 
 class LocalRunner:
@@ -181,6 +170,7 @@ class LocalRunner:
         hardware = self.hardware()
         return {
             "hardware_label": hardware.label,
+            "runner": "local",
             "hostname": os.uname().nodename,
             "specs": hardware.specs.model_dump(),
             "capabilities": hardware.capabilities,
@@ -189,8 +179,8 @@ class LocalRunner:
                 "path": str(self.settings.lock_file),
                 "sha256": sha256(self.settings.lock_file),
             },
-            "gaib": git_state(self.settings.gaib_root),
-            "app": git_state(Path(__file__).parent),
+            "gaib": git_state(str(self.settings.gaib_root)),
+            "app": git_state(str(Path(__file__).parent)),
         }
 
     def dataset_problems(self, spec: JobSpec) -> list[str]:
@@ -201,17 +191,6 @@ class LocalRunner:
                 problems.append(f"{dataset_id}: {state}.")
         return problems
 
-    async def store_environment(self, handle: JobHandle) -> str:
-        snapshot = await self.environment()
-        digest = hashlib.sha256(canonical(snapshot)).hexdigest()
-        text = json.dumps(snapshot, indent=2)
-        (handle.job_dir / "environment.json").write_text(text)
-        if handle.environment_dir is not None:
-            target = handle.environment_dir / f"{digest}.json"
-            if not target.exists():
-                target.write_text(text)
-        return digest
-
     async def run(self, handle: JobHandle) -> None:
         spec = handle.spec
         await handle.emit("started")
@@ -220,20 +199,25 @@ class LocalRunner:
             if problems:
                 await handle.emit("failed", reason=" ".join(problems))
                 return
-        environment = await self.store_environment(handle)
+        environment = store_environment(handle, await self.environment())
         await handle.emit("environment", sha256=environment)
-        for invocation in spec.invocations:
-            code = await self.invoke(handle, invocation)
-            if handle.cancel_requested:
-                await handle.emit("cancelled")
-                return
-            if code != 0:
-                await handle.emit(
-                    "failed",
-                    reason=f"{invocation.driver} exited with code {code}.",
-                    tail=log_tail(handle.job_dir / "stdout.log"),
-                )
-                return
+        lock = await acquire_machine_lock(handle)
+        try:
+            await handle.emit("running")
+            for invocation in spec.invocations:
+                code = await self.invoke(handle, invocation)
+                if handle.cancel_requested:
+                    await handle.emit("cancelled")
+                    return
+                if code != 0:
+                    await handle.emit(
+                        "failed",
+                        reason=f"{invocation.driver} exited with code {code}.",
+                        tail=log_tail(handle.job_dir / "stdout.log"),
+                    )
+                    return
+        finally:
+            worker.unlock(lock)
         shutil.rmtree(handle.job_dir / "work")
         await handle.emit("finished", environment=environment)
 
@@ -242,10 +226,10 @@ class LocalRunner:
         with (handle.job_dir / "command.jsonl").open("a") as f:
             f.write(invocation.model_dump_json() + "\n")
         results = Path(invocation.results_csv) if invocation.results_csv else None
-        seen = len(read_rows(results)) if results else 0
+        seen = len(worker.read_rows(results)) if results else 0
         rows_before = seen
         cache = Path(invocation.cwd) / "cache"
-        cache_before = set(cache.glob("*.txt"))
+        cache_before = worker.cache_files(cache)
         with (handle.job_dir / "stdout.log").open("ab") as log:
             handle.process = await asyncio.create_subprocess_exec(
                 *invocation.argv,
@@ -263,31 +247,18 @@ class LocalRunner:
                 except TimeoutError:
                     pass
                 if results:
-                    seen = await self.report_rows(handle, results, seen)
+                    seen = await report_rows(handle, worker.read_rows(results), seen)
         if handle.process.returncode == 0 and invocation.driver == "gaib-runner":
-            keep_first_outputs(
-                handle,
-                results,
-                rows_before,
-                sorted(set(cache.glob("*.txt")) - cache_before, key=cache_stamp),
-            )
-        return handle.process.returncode
-
-    async def report_rows(self, handle: JobHandle, results: Path, seen: int) -> int:
-        if not results.exists():
-            return seen
-        rows = read_rows(results)
-        for index, row in enumerate(rows[seen:], start=seen):
-            configuration = handle.spec.configuration_of(row["task"], row["dataset"])
-            if configuration is None:
-                logger.warning(
-                    "Row %d of %s matches no configuration in job %s",
-                    index,
-                    results,
-                    handle.spec.id,
+            try:
+                kept = worker.keep_first_outputs(
+                    worker.read_rows(results)[rows_before:],
+                    list(worker.cache_files(cache) - cache_before),
+                    handle.job_dir / "outputs",
                 )
-            await handle.emit("run_completed", configuration=configuration, row=row)
-        return len(rows)
+                index_outputs(handle, kept)
+            except ValueError as error:
+                logger.warning("Job %s: %s; outputs not kept", handle.spec.id, error)
+        return handle.process.returncode
 
     async def cancel(self, handle: JobHandle) -> None:
         handle.cancel_requested = True
@@ -311,13 +282,14 @@ class JobQueue:
 
     async def submit(self, handle: JobHandle) -> None:
         self.handles[handle.spec.id] = handle
-        await handle.emit("queued")
+        if not handle.resumed:
+            await handle.emit("queued")
         await self.pending.put(handle)
 
     async def work(self) -> None:
         while True:
             handle = await self.pending.get()
-            if handle.cancel_requested:
+            if handle.cancel_requested and not handle.resumed:
                 continue
             self.current = handle
             try:

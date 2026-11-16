@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import fcntl
 import json
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -21,21 +22,24 @@ from egb.analysis import (
     runs_from_rows,
 )
 from egb.datasets import DatasetStatus, DatasetStore, dataset_properties
-from egb.hardware import Hardware, detect_local, store_label
+from egb.hardware import LOCAL_ID, Hardware, detect_local, store_label
 from egb.jobs import (
     ConfigurationStatus,
     JobRequest,
     JobSpec,
     configuration_statuses,
+    local_paths,
     new_job_id,
     resolve_dataset_job,
     resolve_session_job,
 )
+from egb.machine import git_state
 from egb.predictions import Evaluation, evaluate
 from egb.registry import KINDS, load_registry
+from egb.remote import RemoteRunner
 from egb.report import report
 from egb.results import cross_paths, job_specs, saved_outputs, session_rows
-from egb.runners import JobEvent, JobHandle, JobQueue, LocalRunner, git_state
+from egb.runners import JobEvent, JobHandle, JobQueue, LocalRunner, Runner
 from egb.sessions import (
     TERMINAL,
     ConfigInput,
@@ -62,7 +66,11 @@ from egb.suggesters import (
     observe,
     runnable_alternatives,
 )
+from egb.targets import load_targets
+from egb.transport import make_transport
 from egb.validity import ValidityResult, bench_comparer, check_validity
+
+RESUMABLE = {"started", "waiting", "running", "lost"}
 
 
 class LabelUpdate(BaseModel):
@@ -95,29 +103,92 @@ class Core:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.registry = load_registry(list(settings.entries))
-        self.hardware = detect_local(settings.bench_python, settings.hardware_file)
         self.datasets = DatasetStore(settings.datasets_dir)
         self.sessions = SessionStore(settings.sessions_dir, self.registry)
-        self.runner = LocalRunner(settings, lambda: self.hardware, self.datasets, self.registry)
-        self.queue = JobQueue(self.runner)
+        self.gaib_commit = git_state(str(settings.gaib_root))["commit"]
+        self.app_commit = git_state(str(Path(__file__).parent))["commit"]
+        self.hardware: dict[str, Hardware] = {
+            LOCAL_ID: detect_local(settings.bench_python, settings.hardware_file)
+        }
+        self.runners: dict[str, Runner] = {
+            LOCAL_ID: LocalRunner(
+                settings, lambda: self.hardware[LOCAL_ID], self.datasets, self.registry
+            )
+        }
+        self.targets = {
+            t.name: t
+            for t in load_targets(settings.targets_file, set(self.registry.implementations))
+        }
+        for name, target in self.targets.items():
+            runner = RemoteRunner(
+                target,
+                make_transport(target, settings.data_dir / "ssh"),
+                settings,
+                self.registry,
+                self.datasets,
+                self.gaib_commit,
+                lambda name=name: self.hardware[name],
+            )
+            self.runners[name] = runner
+            self.hardware[name] = runner.unreachable("Checking.").model_copy(
+                update={"status": "checking"}
+            )
+        self.queues = {name: JobQueue(runner) for name, runner in self.runners.items()}
         self.analysis_settings = load_analysis_settings(settings.analysis_config)
         self.suggesters: dict[str, HypothesisSuggester] = {
             "rules": RuleSuggester(self.registry, self.analysis_settings),
             "agent": AgentSuggester(),
         }
         self.comparer = bench_comparer(settings.bench_python, settings.gaib_dir)
-        self.gaib_commit = git_state(settings.gaib_root)["commit"]
-        self.app_commit = git_state(Path(__file__).parent)["commit"]
         settings.data_jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def local_queue(self) -> JobQueue:
+        return self.queues[LOCAL_ID]
 
     @property
     def data_jobs_log(self) -> Path:
         return self.settings.data_jobs_dir / "jobs.jsonl"
 
-    def mark_interrupted(self) -> None:
+    async def probe(self, hardware_id: str) -> Hardware:
+        if hardware_id == LOCAL_ID:
+            detected = await asyncio.to_thread(
+                detect_local, self.settings.bench_python, self.settings.hardware_file
+            )
+        else:
+            detected = await self.runners[hardware_id].probe()
+        self.hardware[hardware_id] = detected
+        return detected
+
+    def find_handle(self, job_id: str) -> JobHandle | None:
+        for queue in self.queues.values():
+            if job_id in queue.handles:
+                return queue.handles[job_id]
+        return None
+
+    async def recover(self) -> None:
         for meta in self.sessions.metas():
+            folder = self.sessions.folder(meta.id)
             for job_id, status in self.sessions.job_statuses(meta.id).items():
-                if status not in TERMINAL:
+                if status in TERMINAL:
+                    continue
+                spec_path = folder / "jobs" / job_id / "spec.json"
+                spec = (
+                    JobSpec.model_validate_json(spec_path.read_text())
+                    if spec_path.exists()
+                    else None
+                )
+                if spec is not None and status in RESUMABLE and spec.hardware in self.targets:
+                    handle = JobHandle(
+                        spec,
+                        folder / "jobs" / job_id,
+                        folder / "environment",
+                        lambda record, sid=meta.id: self.sessions.append_job_record(sid, record),
+                        resumed=True,
+                    )
+                    handle.status = status
+                    await self.queues[spec.hardware].submit(handle)
+                else:
                     self.sessions.append_job_record(
                         meta.id, {"job_id": job_id, "status": "interrupted", "at": now()}
                     )
@@ -155,10 +226,13 @@ class Core:
     def analysis(self, session_id: str) -> Analysis:
         return analyse(self.runs(session_id), self.analysis_settings)
 
-    def config_key(self, session_id: str, configuration: str, hardware: str) -> ConfigKey:
+    def label_of(self, hardware_id: str) -> str:
+        return self.hardware[hardware_id].label if hardware_id in self.hardware else hardware_id
+
+    def config_key(self, session_id: str, configuration: str) -> ConfigKey:
         candidate = self.session(session_id).config.candidate(configuration)
         return ConfigKey(
-            hardware=hardware,
+            hardware=self.label_of(candidate.hardware),
             implementation=candidate.implementation,
             representation=candidate.representation,
         )
@@ -166,8 +240,8 @@ class Core:
     def validity(
         self, session_id: str, targeted: ConfigKey, baseline: ConfigKey, dataset: str
     ) -> ValidityResult:
-        if self.queue.busy:
-            raise HTTPException(409, "A job is running. Check validity when it ends.")
+        if self.local_queue.busy:
+            raise HTTPException(409, "A local job is running. Check validity when it ends.")
         folder = self.sessions.folder(session_id)
         try:
             return check_validity(
@@ -183,6 +257,11 @@ class Core:
             )
         except ValueError as error:
             raise bad_request(error)
+
+    def unknown_hardware(self, config: ConfigInput) -> None:
+        unknown = sorted({c.hardware for c in config.candidates} - set(self.hardware))
+        if unknown:
+            raise HTTPException(400, f"No hardware {', '.join(unknown)}.")
 
     def session(self, session_id: str) -> Session:
         try:
@@ -212,12 +291,15 @@ def create_app(settings: Settings) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with exclusive_lock(settings.data_dir / ".egb.lock"):
-            core.mark_interrupted()
-            worker = asyncio.create_task(core.queue.work())
+            workers = [asyncio.create_task(queue.work()) for queue in core.queues.values()]
+            await core.recover()
+            probes = [asyncio.create_task(core.probe(name)) for name in core.targets]
             yield
-            if core.queue.current is not None:
-                await core.runner.cancel(core.queue.current)
-            worker.cancel()
+            local = core.local_queue.current
+            if local is not None:
+                await core.runners[LOCAL_ID].cancel(local)
+            for task in workers + probes:
+                task.cancel()
 
     app = FastAPI(title="empirical-graph-bench", lifespan=lifespan)
     app.state.core = core
@@ -241,7 +323,13 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/api/hardware")
     def hardware() -> list[Hardware]:
-        return [core.hardware]
+        return list(core.hardware.values())
+
+    @app.post("/api/hardware/{hardware_id}/probe")
+    async def probe_hardware(hardware_id: str) -> Hardware:
+        if hardware_id not in core.hardware:
+            raise HTTPException(404, f"No hardware {hardware_id}.")
+        return await core.probe(hardware_id)
 
     @app.patch("/api/hardware/local")
     def rename_hardware(update: LabelUpdate) -> Hardware:
@@ -249,18 +337,22 @@ def create_app(settings: Settings) -> FastAPI:
             store_label(settings.hardware_file, update.label)
         except ValueError as error:
             raise bad_request(error)
-        core.hardware = core.hardware.model_copy(update={"label": update.label})
-        return core.hardware
+        core.hardware[LOCAL_ID] = core.hardware[LOCAL_ID].model_copy(update={"label": update.label})
+        return core.hardware[LOCAL_ID]
 
     @app.get("/api/configurations")
     def configurations() -> list[ConfigurationStatus]:
-        return configuration_statuses(core.registry, core.hardware)
+        return [
+            status
+            for machine in core.hardware.values()
+            for status in configuration_statuses(core.registry, machine)
+        ]
 
     @app.get("/api/datasets")
     def datasets() -> list[DatasetStatus]:
         properties = dataset_properties(settings.dataset_properties)
         return [
-            core.datasets.status(d, compute=not core.queue.busy).model_copy(
+            core.datasets.status(d, compute=not core.local_queue.busy).model_copy(
                 update={"properties": properties.get(d.id)}
             )
             for d in core.registry.datasets.values()
@@ -271,7 +363,7 @@ def create_app(settings: Settings) -> FastAPI:
         job_dir = settings.data_jobs_dir / job_id
         try:
             spec = resolve_dataset_job(
-                kind, dataset_ids, core.registry, core.hardware, settings, job_id, job_dir
+                kind, dataset_ids, core.registry, core.hardware[LOCAL_ID], settings, job_id, job_dir
             )
         except ValueError as error:
             raise bad_request(error)
@@ -279,7 +371,7 @@ def create_app(settings: Settings) -> FastAPI:
         handle = JobHandle(
             spec, job_dir, None, lambda record: append_jsonl(core.data_jobs_log, record)
         )
-        await core.queue.submit(handle)
+        await core.local_queue.submit(handle)
         return spec
 
     @app.post("/api/datasets/{dataset_id}/download", status_code=202)
@@ -296,9 +388,11 @@ def create_app(settings: Settings) -> FastAPI:
         return await submit_data_job("properties", present)
 
     @app.get("/api/queue")
-    def queue() -> QueueView:
-        running = core.queue.current.spec.id if core.queue.current else None
-        return QueueView(running=running, queued=core.queue.queued())
+    def queue() -> dict[str, QueueView]:
+        return {
+            name: QueueView(running=q.current.spec.id if q.current else None, queued=q.queued())
+            for name, q in core.queues.items()
+        }
 
     @app.get("/api/sessions")
     def sessions() -> list[SessionMeta]:
@@ -306,6 +400,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/sessions", status_code=201)
     def create_session(data: SessionCreate) -> Session:
+        core.unknown_hardware(data.config)
         try:
             return core.sessions.create(data, core.app_commit, core.gaib_commit)
         except ValueError as error:
@@ -318,6 +413,7 @@ def create_app(settings: Settings) -> FastAPI:
     @app.patch("/api/sessions/{session_id}/config")
     def update_config(session_id: str, data: ConfigInput) -> SessionConfig:
         core.session(session_id)
+        core.unknown_hardware(data)
         try:
             return core.sessions.update_config(session_id, data)
         except ValueError as error:
@@ -342,33 +438,56 @@ def create_app(settings: Settings) -> FastAPI:
         return core.sessions.verify_log(session_id)
 
     @app.post("/api/sessions/{session_id}/jobs", status_code=202)
-    async def start_job(session_id: str, request: JobRequest) -> JobSpec:
+    async def start_job(session_id: str, request: JobRequest) -> list[JobSpec]:
         current = core.session(session_id)
-        job_id = new_job_id()
-        job_dir = core.sessions.job_dir(session_id, job_id)
-        try:
-            spec = resolve_session_job(
-                request,
-                current,
-                core.sessions.log(session_id),
-                core.registry,
-                core.hardware,
-                core.datasets,
-                settings,
-                job_id,
-                job_dir,
+        unknown = [
+            c for c in request.configurations if c not in {x.id for x in current.config.candidates}
+        ]
+        if unknown:
+            raise HTTPException(400, f"Not candidate configurations: {', '.join(unknown)}.")
+        groups: dict[str, list[str]] = {}
+        for configuration in request.configurations:
+            groups.setdefault(current.config.candidate(configuration).hardware, []).append(
+                configuration
             )
+        missing = [h for h in groups if h not in core.hardware]
+        if missing:
+            raise HTTPException(400, f"No hardware {', '.join(missing)}.")
+        prepared = []
+        try:
+            for hardware_id, configurations in groups.items():
+                job_id = new_job_id()
+                job_dir = core.sessions.job_dir(session_id, job_id)
+                runner = core.runners[hardware_id]
+                remote = isinstance(runner, RemoteRunner)
+                paths = runner.paths(job_id) if remote else local_paths(settings, job_dir)
+                uploads = not remote or runner.target.datasets == "upload"
+                spec = resolve_session_job(
+                    request.model_copy(update={"configurations": configurations}),
+                    current,
+                    core.sessions.log(session_id),
+                    core.registry,
+                    core.hardware[hardware_id],
+                    core.datasets if uploads else None,
+                    paths,
+                    job_id,
+                    job_dir,
+                )
+                (job_dir / "spec.json").write_text(spec.model_dump_json(indent=2))
+                prepared.append((hardware_id, spec, job_dir))
         except ValueError as error:
+            for _, spec, job_dir in prepared:
+                shutil.rmtree(job_dir)
             raise bad_request(error)
-        (job_dir / "spec.json").write_text(spec.model_dump_json(indent=2))
-        handle = JobHandle(
-            spec,
-            job_dir,
-            core.sessions.folder(session_id) / "environment",
-            lambda record: core.sessions.append_job_record(session_id, record),
-        )
-        await core.queue.submit(handle)
-        return spec
+        for hardware_id, spec, job_dir in prepared:
+            handle = JobHandle(
+                spec,
+                job_dir,
+                core.sessions.folder(session_id) / "environment",
+                lambda record: core.sessions.append_job_record(session_id, record),
+            )
+            await core.queues[hardware_id].submit(handle)
+        return [spec for _, spec, _ in prepared]
 
     @app.get("/api/sessions/{session_id}/jobs")
     def session_jobs(session_id: str) -> list[JobView]:
@@ -379,14 +498,14 @@ def create_app(settings: Settings) -> FastAPI:
     def job(job_id: str) -> JobView:
         job_dir, session_id = core.job_location(job_id)
         spec = JobSpec.model_validate_json((job_dir / "spec.json").read_text())
-        handle = core.queue.handles.get(job_id)
+        handle = core.find_handle(job_id)
         if handle is not None:
             return JobView(spec=spec, status=handle.status, events=handle.events)
         return JobView(spec=spec, status=core.stored_status(job_id, session_id), events=[])
 
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str) -> StreamingResponse:
-        handle = core.queue.handles.get(job_id)
+        handle = core.find_handle(job_id)
         if handle is None:
             view = job(job_id)
             stored = JobEvent(seq=0, type=view.status or "unknown", at=now(), data={})
@@ -410,9 +529,10 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.delete("/api/jobs/{job_id}", status_code=202)
     async def cancel_job(job_id: str) -> JobView:
-        if job_id not in core.queue.handles or core.queue.handles[job_id].done:
+        handle = core.find_handle(job_id)
+        if handle is None or handle.done:
             raise HTTPException(409, f"{job_id} is not queued or running.")
-        await core.queue.cancel(job_id)
+        await core.queues[handle.spec.hardware].cancel(job_id)
         return job(job_id)
 
     @app.get("/api/sessions/{session_id}/results")
@@ -464,11 +584,11 @@ def create_app(settings: Settings) -> FastAPI:
         spec = view.spec
         if spec.session_id is None or spec.baseline is None:
             raise HTTPException(400, f"{job_id} has no baseline configuration.")
-        baseline = core.config_key(spec.session_id, spec.baseline, spec.hardware_label)
+        baseline = core.config_key(spec.session_id, spec.baseline)
         return [
             core.validity(
                 spec.session_id,
-                core.config_key(spec.session_id, item.configuration, spec.hardware_label),
+                core.config_key(spec.session_id, item.configuration),
                 baseline,
                 item.dataset,
             )
@@ -492,9 +612,15 @@ def create_app(settings: Settings) -> FastAPI:
         if start.suggester not in core.suggesters:
             raise HTTPException(400, f"No suggester {start.suggester}.")
         current = core.analysis(session_id)
-        alternatives = runnable_alternatives(
-            core.registry, {core.hardware.label: core.hardware.capabilities}
-        )
+        reachable = [h for h in core.hardware.values() if h.status == "reachable"]
+        supports = {h.label: h.supports for h in reachable}
+        alternatives = [
+            a
+            for a in runnable_alternatives(
+                core.registry, {h.label: h.capabilities for h in reachable}
+            )
+            if supports[a.hardware] is None or a.implementation in supports[a.hardware]
+        ]
         request = SuggestionRequest(
             analysis=current,
             observations=observe(current, core.registry),

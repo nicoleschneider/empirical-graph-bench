@@ -50,6 +50,20 @@ The API is at `http://127.0.0.1:8000/api`, with interactive docs at
 curl -X POST http://127.0.0.1:8000/api/datasets/email-Eu-core/download
 ```
 
+## Remote hardware
+
+Declare SSH targets in `data/targets.yaml` (see `docs/remote.md`, section 2).
+Connection details belong in `~/.ssh/config`; the app uses your keys and
+agent and never asks for passwords. Then, once per target:
+
+```
+uv run --project backend egb remote setup <target>
+```
+
+This sends gaib at the pinned commit and builds the benchmark environment
+on the remote machine; it needs the remote machine to reach PyPI. Real SSH
+to another machine is untested; see `docs/remote.md`, section 13.
+
 ## Test
 
 ```
@@ -58,6 +72,15 @@ uv run pytest
 uv run pytest --data-dir=../data
 ```
 
-The second command adds the end-to-end test. It starts a server, runs
+The second command adds the end-to-end tests. The remote ones need a
+`local-shell` stand-in target set up first:
+
+```
+uv run --project backend egb remote setup standin
+```
+
+with `standin` declared in `data/targets.yaml` as in `docs/remote.md`.
+
+The local end-to-end test starts a server, runs
 email-Eu-core with Louvain and PageRank, and compares the rows with a
 direct `runner.py` run and with the paper's Mac results.

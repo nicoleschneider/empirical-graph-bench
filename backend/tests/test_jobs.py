@@ -5,7 +5,7 @@ import pytest
 
 from egb.datasets import DatasetStore
 from egb.hardware import Hardware, Specs
-from egb.jobs import JobRequest, configuration_statuses, resolve_session_job
+from egb.jobs import JobRequest, configuration_statuses, local_paths, resolve_session_job
 from egb.registry import Registry
 from egb.sessions import ConfigInput, ConfigurationInput, SessionCreate, SessionStore
 from egb.settings import BUILT_IN_ANALYSIS, BUILT_IN_ENTRIES, Settings
@@ -29,6 +29,7 @@ def hardware(capabilities: list[str]) -> Hardware:
         id="local",
         label="test-cpu",
         runner="local",
+        status="reachable",
         specs=specs,
         capabilities=capabilities,
         unavailable={"cuda": "No NVIDIA GPU found.", "cudf": "No NVIDIA GPU found."},
@@ -46,6 +47,7 @@ def setup(tmp_path: Path, registry: Registry):
         entries=(BUILT_IN_ENTRIES,),
         poll_seconds=1.0,
         analysis_config=BUILT_IN_ANALYSIS,
+        targets_file=tmp_path / "targets.yaml",
     )
     datasets = DatasetStore(settings.datasets_dir)
     email = registry.datasets["email-Eu-core"]
@@ -94,7 +96,7 @@ def test_runner_job_mirrors_gaib_definitions(setup, registry: Registry) -> None:
         registry,
         hardware(["cpu"]),
         datasets,
-        settings,
+        local_paths(settings, job_dir),
         "j1",
         job_dir,
     )
@@ -124,7 +126,7 @@ def test_blocked_configuration_rejected(setup, registry: Registry) -> None:
             registry,
             hardware(["cpu"]),
             datasets,
-            settings,
+            local_paths(settings, store.job_dir(session.meta.id, "j1")),
             "j1",
             store.job_dir(session.meta.id, "j1"),
         )
@@ -139,7 +141,7 @@ def test_representation_job_on_cuda_machine(setup, registry: Registry) -> None:
         registry,
         hardware(["cpu", "cuda", "cudf"]),
         datasets,
-        settings,
+        local_paths(settings, store.job_dir(session.meta.id, "j1")),
         "j1",
         store.job_dir(session.meta.id, "j1"),
     )
@@ -160,7 +162,7 @@ def test_targeted_job_needs_hypothesis(setup, registry: Registry) -> None:
             registry,
             hardware(["cpu"]),
             datasets,
-            settings,
+            local_paths(settings, store.job_dir(session.meta.id, "j1")),
             "j1",
             store.job_dir(session.meta.id, "j1"),
         )

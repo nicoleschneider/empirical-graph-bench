@@ -1,4 +1,5 @@
 export type Selection = {
+  hardware: string[];
   tasks: string[];
   datasets: string[];
   configurations: string[];
@@ -8,8 +9,13 @@ export type Selection = {
 
 export const BASE_SEED = 123;
 
-export function configurationKey(implementation: string, representation: string): string {
-  return `${implementation}/${representation}`;
+export function configurationKey(hardware: string, implementation: string, representation: string): string {
+  return `${hardware}/${implementation}/${representation}`;
+}
+
+export function splitKey(key: string): { hardware: string; implementation: string; representation: string } {
+  const [hardware, implementation, representation] = key.split("/");
+  return { hardware, implementation, representation };
 }
 
 export function withColor(colors: Record<string, number>, key: string): Record<string, number> {
