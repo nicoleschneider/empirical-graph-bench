@@ -172,11 +172,23 @@ export type Suggestion = {
   predictions: PredictionDraft[];
   validity_checks: ValidityCheckDraft[];
   caveats: string[];
+  observation: string | null;
+  dimension: string | null;
+  rationale: string | null;
+  repairs: string[];
 };
 
 export type SuggestionRecord = {
   id: string;
-  response: { suggester: string; status: "complete" | "unavailable"; message: string | null; suggestions: Suggestion[] };
+  response: {
+    suggester: string;
+    status: "complete" | "unavailable";
+    message: string | null;
+    suggestions: Suggestion[];
+    fallback_reason: string | null;
+    rejected: { hypothesis: string; reasons: string[] }[];
+    calls: { model: string; latency_seconds: number; cost_usd: number }[];
+  };
 };
 
 export type Interval = { point: number; low: number; high: number; resamples: number; seed: number };

@@ -54,6 +54,10 @@ class Suggestion(BaseModel):
     predictions: list[PredictionDraft]
     validity_checks: list[ValidityCheckDraft]
     caveats: list[str]
+    observation: str | None = None
+    dimension: str | None = None
+    rationale: str | None = None
+    repairs: list[str] = []
 
 
 class SuggestionRequest(BaseModel):
@@ -62,6 +66,24 @@ class SuggestionRequest(BaseModel):
     alternatives: list[ConfigKey]
     history: list[LogEntry]
     limit: int = 10
+    workload: dict = {}
+    configurations: list[dict] = []
+
+
+class RejectedSuggestion(BaseModel):
+    hypothesis: str
+    reasons: list[str]
+
+
+class CallStats(BaseModel):
+    model: str
+    latency_seconds: float
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    cost_usd: float
+    stop_reason: str | None
 
 
 class SuggestionResponse(BaseModel):
@@ -69,6 +91,9 @@ class SuggestionResponse(BaseModel):
     status: Literal["complete", "unavailable"]
     message: str | None
     suggestions: list[Suggestion]
+    fallback_reason: str | None = None
+    rejected: list[RejectedSuggestion] = []
+    calls: list[CallStats] = []
 
 
 class HypothesisSuggester(Protocol):
@@ -184,6 +209,44 @@ def observe(analysis: Analysis, registry: Registry) -> list[Observation]:
     return found
 
 
+def same_output_checks(
+    registry: Registry,
+    settings: AnalysisSettings,
+    targeted: ConfigKey,
+    baseline: ConfigKey,
+    datasets: list[str],
+) -> list[ValidityCheckDraft]:
+    if registry.task_of(targeted.implementation).output == "scores":
+        return [
+            ValidityCheckDraft(
+                text=f"Scores match the baseline within L1 {settings.validity_l1_tolerance:g}.",
+                check="l1",
+                expected=f"<= {settings.validity_l1_tolerance:g}",
+                targeted=targeted,
+                baseline=baseline,
+                datasets=datasets,
+            )
+        ]
+    return [
+        ValidityCheckDraft(
+            text="Partitions identical to the baseline at the same seed.",
+            check="identical",
+            expected="true",
+            targeted=targeted,
+            baseline=baseline,
+            datasets=datasets,
+        ),
+        ValidityCheckDraft(
+            text=f"Modularity within {settings.modularity_tolerance:g} of the baseline.",
+            check="modularity_difference",
+            expected=f"within {settings.modularity_tolerance:g}",
+            targeted=targeted,
+            baseline=baseline,
+            datasets=datasets,
+        ),
+    ]
+
+
 class RuleSuggester:
     id = "rules"
 
@@ -275,35 +338,7 @@ class RuleSuggester:
     def same_output_checks(
         self, targeted: ConfigKey, baseline: ConfigKey, datasets: list[str]
     ) -> list[ValidityCheckDraft]:
-        if self.registry.task_of(targeted.implementation).output == "scores":
-            return [
-                ValidityCheckDraft(
-                    text=f"Scores match the baseline within L1 {self.settings.validity_l1_tolerance:g}.",
-                    check="l1",
-                    expected=f"<= {self.settings.validity_l1_tolerance:g}",
-                    targeted=targeted,
-                    baseline=baseline,
-                    datasets=datasets,
-                )
-            ]
-        return [
-            ValidityCheckDraft(
-                text="Partitions identical to the baseline at the same seed.",
-                check="identical",
-                expected="true",
-                targeted=targeted,
-                baseline=baseline,
-                datasets=datasets,
-            ),
-            ValidityCheckDraft(
-                text=f"Modularity within {self.settings.modularity_tolerance:g} of the baseline.",
-                check="modularity_difference",
-                expected=f"within {self.settings.modularity_tolerance:g}",
-                targeted=targeted,
-                baseline=baseline,
-                datasets=datasets,
-            ),
-        ]
+        return same_output_checks(self.registry, self.settings, targeted, baseline, datasets)
 
     def etl_dominates(self, analysis: Analysis, candidates: list[ConfigKey]) -> list[Suggestion]:
         suggestions = []
@@ -562,15 +597,3 @@ def runnable_alternatives(
                         )
                     )
     return found
-
-
-class AgentSuggester:
-    id = "agent"
-
-    async def suggest(self, request: SuggestionRequest) -> SuggestionResponse:
-        return SuggestionResponse(
-            suggester=self.id,
-            status="unavailable",
-            message="Agent suggestions are not available yet. Use the rule-based suggester.",
-            suggestions=[],
-        )

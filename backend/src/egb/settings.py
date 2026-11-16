@@ -4,6 +4,7 @@ from pathlib import Path
 
 BUILT_IN_ENTRIES = Path(str(files("egb") / "entries"))
 BUILT_IN_ANALYSIS = Path(str(files("egb") / "analysis.yaml"))
+BUILT_IN_AGENT = Path(str(files("egb") / "agent.yaml"))
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class Settings:
     poll_seconds: float
     analysis_config: Path
     targets_file: Path
+    agent_config: Path
 
     @property
     def gaib_dir(self) -> Path:

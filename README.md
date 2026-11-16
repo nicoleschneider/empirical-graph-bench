@@ -50,6 +50,13 @@ The API is at `http://127.0.0.1:8000/api`, with interactive docs at
 curl -X POST http://127.0.0.1:8000/api/datasets/email-Eu-core/download
 ```
 
+## Agent suggestions
+
+Hypothesis suggestions come from Claude when `ANTHROPIC_API_KEY` is set in
+the environment the backend runs in, and from the rule-based suggester
+otherwise. The model, key variable and effort are in
+`backend/src/egb/agent.yaml`. See `docs/architecture.md`, section 5.
+
 ## Remote hardware
 
 Declare SSH targets in `data/targets.yaml` (see `docs/remote.md`, section 2).
@@ -80,6 +87,13 @@ uv run --project backend egb remote setup standin
 ```
 
 with `standin` declared in `data/targets.yaml` as in `docs/remote.md`.
+
+The live agent tests call the Claude API and cost money; they run only
+with `--live-agent` and the key set:
+
+```
+uv run pytest tests/test_agent_live.py --live-agent --data-dir=../data -s
+```
 
 The local end-to-end test starts a server, runs
 email-Eu-core with Louvain and PageRank, and compares the rows with a

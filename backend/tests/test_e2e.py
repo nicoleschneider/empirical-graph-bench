@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import os
 import socket
 import subprocess
 import sys
@@ -76,7 +77,8 @@ def client(
             "serve",
             "--port",
             str(port),
-        ]
+        ],
+        env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
     )
     with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=30) as http:
         deadline = time.monotonic() + SERVER_START_SECONDS
@@ -280,7 +282,8 @@ def test_analysis_endpoints(client: httpx.Client, finished_job: dict) -> None:
     agent = client.post(
         f"/api/sessions/{session_id}/suggestions", json={"suggester": "agent"}
     ).json()
-    assert agent["response"]["status"] == "unavailable"
+    assert agent["response"]["suggester"] == "rules"
+    assert agent["response"]["fallback_reason"] == "Agent off: ANTHROPIC_API_KEY is not set."
 
 
 def test_targeted_job_validity_and_evaluation(client: httpx.Client, finished_job: dict) -> None:

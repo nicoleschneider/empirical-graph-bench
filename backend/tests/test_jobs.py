@@ -8,7 +8,7 @@ from egb.hardware import Hardware, Specs
 from egb.jobs import JobRequest, configuration_statuses, local_paths, resolve_session_job
 from egb.registry import Registry
 from egb.sessions import ConfigInput, ConfigurationInput, SessionCreate, SessionStore
-from egb.settings import BUILT_IN_ANALYSIS, BUILT_IN_ENTRIES, Settings
+from egb.settings import BUILT_IN_AGENT, BUILT_IN_ANALYSIS, BUILT_IN_ENTRIES, Settings
 
 
 def hardware(capabilities: list[str]) -> Hardware:
@@ -48,6 +48,7 @@ def setup(tmp_path: Path, registry: Registry):
         poll_seconds=1.0,
         analysis_config=BUILT_IN_ANALYSIS,
         targets_file=tmp_path / "targets.yaml",
+        agent_config=BUILT_IN_AGENT,
     )
     datasets = DatasetStore(settings.datasets_dir)
     email = registry.datasets["email-Eu-core"]

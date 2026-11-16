@@ -14,6 +14,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Data directory with a built bench-env, for the end-to-end test",
     )
     parser.addoption(
+        "--live-agent",
+        action="store_true",
+        default=False,
+        help="Call the Claude API in the agent tests; needs the API key variable set",
+    )
+    parser.addoption(
         "--gaib-root",
         type=Path,
         default=Path("../vendor/HARD-graph-benchmark"),

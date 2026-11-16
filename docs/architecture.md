@@ -464,9 +464,56 @@ checks for GPU Louvain's different community counts, cudf loading for GPU
 Louvain on email-Eu-core, and broader datasets between 16,706 and 147,892
 edges.
 
-**AgentSuggester (later).** Same interface. It now returns `unavailable`
-with the message "Agent suggestions are not available yet. Use the
-rule-based suggester." Prompt files will live in `backend/prompts/`.
+**AgentSuggester (now).** Calls the Claude API with the session as
+structured JSON and returns at most three hypotheses, validated before they
+reach the UI. Settings live in `egb/agent.yaml` (`--agent-config` to
+override): model (`claude-opus-5-5`), the environment variable that holds
+the API key (`ANTHROPIC_API_KEY`), effort (`medium`), token and time limits,
+copy limits, and prices for the cost estimate. The key is read from that
+variable on every request, passed straight to the SDK client, and never
+logged, stored or put in a request body.
+
+- **Context:** the workload (tasks; datasets with sizes, orientation,
+  ground truth and computed properties), every configuration on every
+  machine with whether it can run there and why not, per-configuration
+  summaries (phase medians, ETL share, dominant phase, effectiveness
+  medians), validity flags from earlier outcomes (side effects, failed
+  checks), and the whole trail.
+- **Output:** enforced with structured outputs (`output_config.format`,
+  JSON schema). Configuration fields are enums of the registry's ids and the
+  available hardware labels. Each hypothesis has the observation it answers,
+  its HARD dimension (hardware, algorithm or representation), a baseline and
+  a target configuration, a prediction (metric, comparison, a reference
+  configuration or a value, datasets), the prediction as a sentence, and a
+  rationale. The dataset dimension is not offered, because a dataset change
+  is not a configuration change and has no measured threshold to predict
+  against.
+- **Validation** rejects a suggestion whose target is not a registry
+  configuration, cannot run on any available machine, or already has
+  results; whose baseline has no results; that changes more than one of
+  hardware, algorithm and representation (a hardware change may switch to
+  the same algorithm's implementation for that hardware); that repeats a
+  trail entry or another suggestion; whose metric does not fit the task;
+  whose datasets are outside the workload; whose reference configuration
+  solves another task or has no results; whose fixed threshold matches no
+  measured median; or whose rationale breaks the copy rules (more than 12
+  words, banned words, em dashes, exclamation marks). It repairs two
+  things and says so: a wrong dimension label, and a fixed threshold that
+  equals a measured median (tied to that configuration's median).
+- **Fallback:** if the key is missing, the call fails, the model stops
+  early or refuses, the output is not valid JSON, or nothing passes
+  validation, the response comes from the rule-based suggester, with
+  `fallback_reason` and a one-line notice in the UI. Server-side refusal
+  fallback (`fallbacks: "default"`) is on by default.
+- **Temperature:** Claude Opus 5.5 rejects sampling parameters, and the
+  pinned SDK no longer takes `temperature`. `temperature` in `agent.yaml`
+  is `null` and is sent only when set, for models that accept it.
+  Repeatability comes from the fixed schema, sorted context JSON and
+  validation, not from sampling.
+- **The agent only suggests.** Nothing it returns is recorded or run; the
+  practitioner edits and records hypotheses and starts runs.
+- Each response stores the call's model, latency, token counts, estimated
+  cost and stop reason with the suggestion record.
 
 ## 6. Session storage
 

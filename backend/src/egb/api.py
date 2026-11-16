@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
+from egb.agent import AgentSuggester, load_agent_settings
 from egb.analysis import (
     Analysis,
     Comparison,
@@ -57,7 +58,6 @@ from egb.sessions import (
 )
 from egb.settings import Settings
 from egb.suggesters import (
-    AgentSuggester,
     HypothesisSuggester,
     Observation,
     RuleSuggester,
@@ -135,9 +135,15 @@ class Core:
             )
         self.queues = {name: JobQueue(runner) for name, runner in self.runners.items()}
         self.analysis_settings = load_analysis_settings(settings.analysis_config)
+        rules = RuleSuggester(self.registry, self.analysis_settings)
         self.suggesters: dict[str, HypothesisSuggester] = {
-            "rules": RuleSuggester(self.registry, self.analysis_settings),
-            "agent": AgentSuggester(),
+            "rules": rules,
+            "agent": AgentSuggester(
+                self.registry,
+                self.analysis_settings,
+                load_agent_settings(settings.agent_config),
+                rules,
+            ),
         }
         self.comparer = bench_comparer(settings.bench_python, settings.gaib_dir)
         settings.data_jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -257,6 +263,50 @@ class Core:
             )
         except ValueError as error:
             raise bad_request(error)
+
+    def workload(self, session: Session) -> dict:
+        properties = dataset_properties(self.settings.dataset_properties)
+        return {
+            "tasks": {
+                t: {
+                    "name": self.registry.tasks[t].name,
+                    "algorithms": [
+                        a.name for a in self.registry.algorithms.values() if a.task == t
+                    ],
+                }
+                for t in session.config.tasks
+            },
+            "datasets": {
+                d: {
+                    "vertices": self.registry.datasets[d].vertices,
+                    "edges": self.registry.datasets[d].edges,
+                    "directed": self.registry.datasets[d].directed,
+                    "ground_truth": self.registry.datasets[d].ground_truth is not None,
+                    "properties": properties.get(d),
+                }
+                for d in session.config.datasets
+            },
+        }
+
+    def configuration_context(self) -> list[dict]:
+        rows = []
+        for machine in self.hardware.values():
+            for status in configuration_statuses(self.registry, machine):
+                rows.append(
+                    {
+                        "hardware": machine.label,
+                        "hardware_status": machine.status,
+                        "cpu": machine.specs.cpu if machine.specs else None,
+                        "gpus": [g.name for g in machine.specs.gpus] if machine.specs else [],
+                        "implementation": status.implementation,
+                        "representation": status.representation,
+                        "algorithm": status.algorithm,
+                        "task": status.task,
+                        "runnable": status.runnable,
+                        "reasons": status.reasons,
+                    }
+                )
+        return rows
 
     def unknown_hardware(self, config: ConfigInput) -> None:
         unknown = sorted({c.hardware for c in config.candidates} - set(self.hardware))
@@ -627,6 +677,8 @@ def create_app(settings: Settings) -> FastAPI:
             alternatives=alternatives,
             history=core.sessions.log(session_id),
             limit=start.limit,
+            workload=core.workload(core.session(session_id)),
+            configurations=core.configuration_context(),
         )
         response = await core.suggesters[start.suggester].suggest(request)
         record = SuggestionRecord(id=f"r-{new_job_id()[2:]}", created_at=now(), response=response)

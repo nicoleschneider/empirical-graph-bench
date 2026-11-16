@@ -12,7 +12,7 @@ from egb.datasets import DatasetStore
 from egb.machine import git_state
 from egb.registry import load_registry
 from egb.remote import RemoteRunner
-from egb.settings import BUILT_IN_ANALYSIS, BUILT_IN_ENTRIES, Settings
+from egb.settings import BUILT_IN_AGENT, BUILT_IN_ANALYSIS, BUILT_IN_ENTRIES, Settings
 from egb.targets import load_targets
 from egb.transport import make_transport
 
@@ -33,6 +33,7 @@ def settings_from(flags: argparse.Namespace) -> Settings:
         poll_seconds=flags.poll_seconds,
         analysis_config=flags.analysis_config.resolve(),
         targets_file=(flags.targets or data_dir / "targets.yaml").resolve(),
+        agent_config=flags.agent_config.resolve(),
     )
 
 
@@ -122,6 +123,12 @@ def main() -> None:
         type=Path,
         default=BUILT_IN_ANALYSIS,
         help="Thresholds and bootstrap settings for the analysis",
+    )
+    ap.add_argument(
+        "--agent-config",
+        type=Path,
+        default=BUILT_IN_AGENT,
+        help="Model, API key variable, effort and prices for the agent suggester",
     )
     ap.add_argument(
         "--targets",

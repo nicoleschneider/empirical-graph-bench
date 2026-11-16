@@ -1,48 +1,22 @@
 import asyncio
-import csv
 from pathlib import Path
 
 import pytest
+from paper_fixture import CAPABILITIES, EXPLORATION, GPU, MAC, SETTINGS, XEON, key, load
 
-from egb.analysis import ConfigKey, Run, analyse, load_analysis_settings, runs_from_rows
+from egb.analysis import Run, analyse
 from egb.predictions import Prediction, evaluate
 from egb.registry import Registry
-from egb.settings import BUILT_IN_ANALYSIS
 from egb.suggesters import RuleSuggester, SuggestionRequest, observe, runnable_alternatives
 from egb.validity import check_validity, read_cross_paths
 
-EXPLORATION = [
-    "mac_m5max_20261019/results_cpu.csv",
-    "mac_m5max_additions_20261020/results_cpu.csv",
-    "cluster_tron69_20261019/results_cpu.csv",
-    "cluster_tron69_20261019/results_gpu.csv",
-    "cluster_additions_7926352/results_cpu.csv",
-    "cluster_additions_7926352/results_gpu.csv",
-]
 LOUVAIN_CUDF = "cluster_tron68_louvain_cudf_20261022"
 LPA = "mac_m5max_lpa_20261022/results_cpu.csv"
-MAC, XEON, GPU = "macbook-m5max-48gb", "nexus-xeon4216-cpu", "nexus-2080ti-gpu"
-CAPABILITIES = {MAC: ["cpu"], XEON: ["cpu"], GPU: ["cpu", "cuda", "cudf"]}
-SETTINGS = load_analysis_settings(BUILT_IN_ANALYSIS)
-
-
-def key(hardware: str, implementation: str, representation: str = "networkx-text") -> ConfigKey:
-    return ConfigKey(
-        hardware=hardware, implementation=implementation, representation=representation
-    )
 
 
 @pytest.fixture(scope="module")
 def results(pytestconfig: pytest.Config) -> Path:
     return pytestconfig.getoption("--gaib-root").resolve() / "gaib" / "results"
-
-
-def load(results: Path, names: list[str], registry: Registry) -> list[Run]:
-    rows = []
-    for name in names:
-        with (results / name).open(newline="") as f:
-            rows += list(csv.DictReader(f))
-    return runs_from_rows(rows, registry)
 
 
 @pytest.fixture(scope="module")

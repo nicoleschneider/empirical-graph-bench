@@ -1,0 +1,15 @@
+model: claude-opus-5-5
+api_key_env: ANTHROPIC_API_KEY
+effort: medium
+max_tokens: 16000
+timeout_seconds: 300
+max_hypotheses: 3
+rationale_max_words: 12
+threshold_match_tolerance: 0.001
+temperature: null
+server_fallback: true
+price_per_million:
+  input: 4.0
+  output: 20.0
+  cache_read: 0.2
+  cache_write: 5.0

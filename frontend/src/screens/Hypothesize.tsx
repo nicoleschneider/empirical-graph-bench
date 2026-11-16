@@ -38,7 +38,8 @@ function recordedTime(entry: LogEntry): string {
 }
 
 export function Hypothesize({ registry, data, summaries, onRefresh }: HypothesizeProps) {
-  const [suggester, setSuggester] = useState("rules");
+  const [suggester, setSuggester] = useState("agent");
+  const [loading, setLoading] = useState(false);
   const [record, setRecord] = useState<SuggestionRecord | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [error, setError] = useState<string | null>(null);
@@ -57,13 +58,20 @@ export function Hypothesize({ registry, data, summaries, onRefresh }: Hypothesiz
     if (!sessionId || !ready || open) return;
     let active = true;
     setError(null);
+    setLoading(true);
+    setRecord(null);
     post<SuggestionRecord>(`/sessions/${sessionId}/suggestions`, { suggester, limit: 5 })
       .then((result) => {
         if (!active) return;
+        setLoading(false);
         setRecord(result);
         setDrafts(Object.fromEntries(result.response.suggestions.map((s) => [s.key, draftOf(s)])));
       })
-      .catch((reason: Error) => active && setError(reason.message));
+      .catch((reason: Error) => {
+        if (!active) return;
+        setLoading(false);
+        setError(reason.message);
+      });
     return () => {
       active = false;
     };
@@ -176,9 +184,16 @@ export function Hypothesize({ registry, data, summaries, onRefresh }: Hypothesiz
             </select>
           </div>
         </div>
-        {record?.response.status === "unavailable" && (
+        {loading && <p className="muted">{suggester === "agent" ? "Asking the agent" : "Loading suggestions"}</p>}
+        {record?.response.fallback_reason && (
           <p className="section-note">
-            <StatusMark status="pending" word="Agent suggestions are not available yet." />
+            <StatusMark status="pending" word={record.response.message ?? record.response.fallback_reason} />
+          </p>
+        )}
+        {record && record.response.calls.length > 0 && (
+          <p className="field-hint">
+            {record.response.calls[0].model}, <N>{record.response.calls[0].latency_seconds.toFixed(1)} s</N>,{" "}
+            <N>${record.response.calls[0].cost_usd.toFixed(3)}</N>
           </p>
         )}
         {record?.response.status === "complete" && suggestions.length === 0 && (
@@ -200,8 +215,22 @@ export function Hypothesize({ registry, data, summaries, onRefresh }: Hypothesiz
               <h2>
                 Suggestion <N>{suggestion.rank}</N>
               </h2>
-              <span className="secondary small">{changeText(registry, suggestion, hardwareCount)}</span>
+              <span className="secondary small">
+                {suggestion.rule === "agent" ? "From the agent" : "From the rules"}.{" "}
+                {changeText(registry, suggestion, hardwareCount)}
+              </span>
             </div>
+            {suggestion.observation && (
+              <p className="section-note">
+                <span className="secondary">Observation:</span> {suggestion.observation}
+              </p>
+            )}
+            {suggestion.rationale && (
+              <p className="section-note">
+                <span className="secondary">Rationale:</span> {suggestion.rationale}
+              </p>
+            )}
+            {suggestion.repairs.length > 0 && <p className="field-hint">Adjusted: {suggestion.repairs.join(" ")}</p>}
             <div className="field wide">
               <label htmlFor={`${suggestion.key}-hypothesis`}>Hypothesis</label>
               <textarea
@@ -271,6 +300,23 @@ export function Hypothesize({ registry, data, summaries, onRefresh }: Hypothesiz
           </section>
         );
       })}
+      {record && record.response.rejected.length > 0 && (
+        <section className="section">
+          <div className="section-header">
+            <h2>Rejected</h2>
+            <span className="secondary small">
+              <N>{record.response.rejected.length}</N> agent suggestions failed validation.
+            </span>
+          </div>
+          <ul className="plain">
+            {record.response.rejected.map((r) => (
+              <li key={r.hypothesis}>
+                {r.hypothesis} <span className="muted">{r.reasons.join(" ")}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </>
   );
 }
