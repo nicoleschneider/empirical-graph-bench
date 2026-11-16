@@ -6,7 +6,7 @@ from pathlib import Path
 import uvicorn
 
 from egb.api import create_app
-from egb.settings import BUILT_IN_ENTRIES, Settings
+from egb.settings import BUILT_IN_ANALYSIS, BUILT_IN_ENTRIES, Settings
 
 BENCH_PYTHON_VERSION = "3.11.9"
 
@@ -23,6 +23,7 @@ def settings_from(flags: argparse.Namespace) -> Settings:
         lock_file=(gaib_root / flags.lock_file).resolve(),
         entries=(BUILT_IN_ENTRIES, *[p.resolve() for p in flags.extra_entries]),
         poll_seconds=flags.poll_seconds,
+        analysis_config=flags.analysis_config.resolve(),
     )
 
 
@@ -79,6 +80,12 @@ def main() -> None:
     )
     ap.add_argument(
         "--poll-seconds", type=float, default=1.0, help="How often a running job's results are read"
+    )
+    ap.add_argument(
+        "--analysis-config",
+        type=Path,
+        default=BUILT_IN_ANALYSIS,
+        help="Thresholds and bootstrap settings for the analysis",
     )
     commands = ap.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="Run the API server")

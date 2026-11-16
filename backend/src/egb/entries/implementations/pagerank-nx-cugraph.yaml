@@ -14,7 +14,9 @@ variants:
     driver: gaib-representation-test
     gaib_task: NX_PAGERANK_GPU_CUDF
     script_task: pagerank
+    cross_path_baseline: networkx-text
   - representation: cudf-float64
     driver: gaib-representation-test
     gaib_task: NX_PAGERANK_GPU_CUDF_F64
     script_task: pagerank
+    cross_path_baseline: networkx-text

@@ -117,6 +117,10 @@ def finished_job(client: httpx.Client) -> dict:
                         "representation": "networkx-text",
                         "exploratory": True,
                     },
+                    {
+                        "implementation": "label-propagation-networkx",
+                        "representation": "networkx-text",
+                    },
                 ],
                 "metrics": [
                     "etl_s",
@@ -188,25 +192,20 @@ def test_results_and_summary(client: httpx.Client, finished_job: dict) -> None:
     rows = client.get(f"/api/sessions/{session_id}/results").json()
     louvain = {r["seed"]: r for r in rows if r["configuration"] == "c1"}
     assert round(louvain[123]["nmi"], 4) == 0.5894
+    hardware = client.get("/api/hardware").json()[0]["label"]
     summary = {
-        s["configuration"]: s for s in client.get(f"/api/sessions/{session_id}/summary").json()
+        s["config"]["implementation"]: s
+        for s in client.get(f"/api/sessions/{session_id}/summary").json()
     }
-    assert summary["c1"]["runs"] == 2
-    assert set(summary["c1"]["metrics"]) == {
-        "etl_s",
-        "processing_s",
-        "end_to_end_s",
+    assert summary["louvain-networkx"]["runs"] == 2
+    assert summary["louvain-networkx"]["config"]["hardware"] == hardware
+    assert set(summary["louvain-networkx"]["effectiveness"]) == {
         "modularity",
         "predicted_communities",
         "nmi",
     }
-    assert set(summary["c2"]["metrics"]) == {
-        "etl_s",
-        "processing_s",
-        "end_to_end_s",
-        "pagerank_l1",
-        "pagerank_top100",
-    }
+    assert set(summary["pagerank-networkx"]["effectiveness"]) == {"pagerank_l1", "pagerank_top100"}
+    assert 0 < summary["pagerank-networkx"]["etl_share"] < 1
     environment = client.get(f"/api/sessions/{session_id}/environment").json()
     assert len(environment) == 1
 
@@ -252,3 +251,90 @@ def test_matches_paper_rows(finished_job: dict, gaib_root: Path) -> None:
             expected = paper[(row["task"], row["seed"])]
             assert {c: row[c] for c in columns} == {c: expected[c] for c in columns}
             assert same_l1(row["pagerank_l1"], expected["pagerank_l1"])
+
+
+def key(hardware: str, implementation: str) -> str:
+    return f"{hardware}/{implementation}/networkx-text"
+
+
+def test_analysis_endpoints(client: httpx.Client, finished_job: dict) -> None:
+    session_id = finished_job["session_id"]
+    hardware = client.get("/api/hardware").json()[0]["label"]
+    analysis = client.get(f"/api/sessions/{session_id}/analysis").json()
+    assert {b["dominant"] for b in analysis["bottlenecks"]} <= {"etl", "processing"}
+    observations = client.get(f"/api/sessions/{session_id}/observations").json()
+    assert observations and all(o["statement"] for o in observations)
+    comparisons = client.get(
+        f"/api/sessions/{session_id}/comparisons",
+        params={"baseline": key(hardware, "louvain-networkx")},
+    )
+    assert comparisons.status_code == 200, comparisons.text
+    rules = client.post(
+        f"/api/sessions/{session_id}/suggestions", json={"suggester": "rules"}
+    ).json()
+    assert rules["response"]["status"] == "complete"
+    stored = client.get(f"/api/sessions/{session_id}/suggestions/{rules['id']}").json()
+    assert stored == rules
+    agent = client.post(
+        f"/api/sessions/{session_id}/suggestions", json={"suggester": "agent"}
+    ).json()
+    assert agent["response"]["status"] == "unavailable"
+
+
+def test_targeted_job_validity_and_evaluation(client: httpx.Client, finished_job: dict) -> None:
+    session_id = finished_job["session_id"]
+    hardware = client.get("/api/hardware").json()[0]["label"]
+    hypothesis = client.post(
+        f"/api/sessions/{session_id}/log",
+        json={"kind": "hypothesis", "text": "Label propagation is faster.", "iteration": 1},
+    ).json()
+    prediction = client.post(
+        f"/api/sessions/{session_id}/log",
+        json={
+            "kind": "prediction",
+            "text": "Label propagation end-to-end time below Louvain on email-Eu-core.",
+            "iteration": 1,
+            "refers_to": [hypothesis["id"]],
+            "prediction": {
+                "metric": "end_to_end_s",
+                "subject": {
+                    "hardware": hardware,
+                    "implementation": "label-propagation-networkx",
+                    "representation": "networkx-text",
+                },
+                "relation": "<",
+                "reference": {
+                    "hardware": hardware,
+                    "implementation": "louvain-networkx",
+                    "representation": "networkx-text",
+                },
+                "datasets": ["email-Eu-core"],
+            },
+        },
+    )
+    assert prediction.status_code == 201, prediction.text
+    job = client.post(
+        f"/api/sessions/{session_id}/jobs",
+        json={
+            "configurations": ["c3"],
+            "datasets": ["email-Eu-core"],
+            "kind": "targeted",
+            "hypothesis": hypothesis["id"],
+            "baseline": "c1",
+        },
+    )
+    assert job.status_code == 202, job.text
+    assert events(client, job.json()["id"])[-1]["type"] == "finished"
+    evaluation = client.post(
+        f"/api/sessions/{session_id}/log/{prediction.json()['id']}/evaluate"
+    ).json()
+    assert evaluation["status"] in {"held", "refuted", "narrow"}
+    assert evaluation["datasets"][0]["ratio"]["resamples"] == 10000
+    validity = client.get(f"/api/jobs/{job.json()['id']}/validity")
+    assert validity.status_code == 200, validity.text
+    result = validity.json()[0]
+    assert result["source"] == "saved_outputs"
+    assert result["identical"] is False
+    assert 0 <= result["nmi_between"] <= 1
+    assert "Algorithm changes from Louvain to Label propagation." in result["side_effects"]
+    assert client.get(f"/api/sessions/{session_id}/log/verify").json()["problems"] == []

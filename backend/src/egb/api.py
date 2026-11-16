@@ -9,6 +9,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from egb.analysis import (
+    Analysis,
+    Comparison,
+    ConfigKey,
+    Run,
+    Summary,
+    analyse,
+    comparisons,
+    load_analysis_settings,
+    runs_from_rows,
+)
 from egb.datasets import DatasetStatus, DatasetStore
 from egb.hardware import Hardware, detect_local, store_label
 from egb.jobs import (
@@ -20,8 +31,9 @@ from egb.jobs import (
     resolve_download,
     resolve_session_job,
 )
+from egb.predictions import Evaluation, evaluate
 from egb.registry import KINDS, load_registry
-from egb.results import SummaryRow, job_specs, session_rows, summarise
+from egb.results import cross_paths, job_specs, saved_outputs, session_rows
 from egb.runners import JobEvent, JobHandle, JobQueue, LocalRunner, git_state
 from egb.sessions import (
     TERMINAL,
@@ -39,6 +51,17 @@ from egb.sessions import (
     read_jsonl,
 )
 from egb.settings import Settings
+from egb.suggesters import (
+    AgentSuggester,
+    HypothesisSuggester,
+    Observation,
+    RuleSuggester,
+    SuggestionRequest,
+    SuggestionResponse,
+    observe,
+    runnable_alternatives,
+)
+from egb.validity import ValidityResult, bench_comparer, check_validity
 
 
 class LabelUpdate(BaseModel):
@@ -56,6 +79,17 @@ class QueueView(BaseModel):
     queued: list[str]
 
 
+class SuggestionStart(BaseModel):
+    suggester: str = "rules"
+    limit: int = 10
+
+
+class SuggestionRecord(BaseModel):
+    id: str
+    created_at: str
+    response: SuggestionResponse
+
+
 class Core:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -65,6 +99,12 @@ class Core:
         self.sessions = SessionStore(settings.sessions_dir, self.registry)
         self.runner = LocalRunner(settings, lambda: self.hardware, self.datasets, self.registry)
         self.queue = JobQueue(self.runner)
+        self.analysis_settings = load_analysis_settings(settings.analysis_config)
+        self.suggesters: dict[str, HypothesisSuggester] = {
+            "rules": RuleSuggester(self.registry, self.analysis_settings),
+            "agent": AgentSuggester(),
+        }
+        self.comparer = bench_comparer(settings.bench_python, settings.gaib_dir)
         self.gaib_commit = git_state(settings.gaib_root)["commit"]
         self.app_commit = git_state(Path(__file__).parent)["commit"]
         settings.downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -104,6 +144,44 @@ class Core:
             else self.sessions.job_statuses(session_id)
         )
         return statuses.get(job_id)
+
+    def runs(self, session_id: str) -> list[Run]:
+        rows = session_rows(
+            self.sessions.folder(session_id), self.sessions.job_statuses(session_id)
+        )
+        return runs_from_rows(rows, self.registry)
+
+    def analysis(self, session_id: str) -> Analysis:
+        return analyse(self.runs(session_id), self.analysis_settings)
+
+    def config_key(self, session_id: str, configuration: str, hardware: str) -> ConfigKey:
+        candidate = self.session(session_id).config.candidate(configuration)
+        return ConfigKey(
+            hardware=hardware,
+            implementation=candidate.implementation,
+            representation=candidate.representation,
+        )
+
+    def validity(
+        self, session_id: str, targeted: ConfigKey, baseline: ConfigKey, dataset: str
+    ) -> ValidityResult:
+        if self.queue.busy:
+            raise HTTPException(409, "A job is running. Check validity when it ends.")
+        folder = self.sessions.folder(session_id)
+        try:
+            return check_validity(
+                targeted,
+                baseline,
+                dataset,
+                self.runs(session_id),
+                self.registry,
+                cross_paths(folder, self.registry),
+                saved_outputs(folder),
+                self.comparer,
+                self.analysis_settings,
+            )
+        except ValueError as error:
+            raise bad_request(error)
 
     def session(self, session_id: str) -> Session:
         try:
@@ -329,12 +407,98 @@ def create_app(settings: Settings) -> FastAPI:
         )
 
     @app.get("/api/sessions/{session_id}/summary")
-    def summary(session_id: str) -> list[SummaryRow]:
-        current = core.session(session_id)
-        rows = session_rows(
-            core.sessions.folder(session_id), core.sessions.job_statuses(session_id)
+    def summary(session_id: str) -> list[Summary]:
+        core.session(session_id)
+        return core.analysis(session_id).summaries
+
+    @app.get("/api/sessions/{session_id}/analysis")
+    def analysis(session_id: str) -> Analysis:
+        core.session(session_id)
+        return core.analysis(session_id)
+
+    @app.get("/api/sessions/{session_id}/observations")
+    def observations(session_id: str) -> list[Observation]:
+        core.session(session_id)
+        return observe(core.analysis(session_id), core.registry)
+
+    @app.get("/api/sessions/{session_id}/comparisons")
+    def session_comparisons(
+        session_id: str, baseline: str, measure: str = "end_to_end_s"
+    ) -> list[Comparison]:
+        core.session(session_id)
+        try:
+            return comparisons(
+                core.runs(session_id), ConfigKey.parse(baseline), measure, core.analysis_settings
+            )
+        except ValueError as error:
+            raise bad_request(error)
+
+    @app.get("/api/sessions/{session_id}/validity")
+    def validity(session_id: str, targeted: str, baseline: str, dataset: str) -> ValidityResult:
+        core.session(session_id)
+        try:
+            keys = ConfigKey.parse(targeted), ConfigKey.parse(baseline)
+        except ValueError as error:
+            raise bad_request(error)
+        return core.validity(session_id, *keys, dataset)
+
+    @app.get("/api/jobs/{job_id}/validity")
+    def job_validity(job_id: str) -> list[ValidityResult]:
+        view = job(job_id)
+        spec = view.spec
+        if spec.session_id is None or spec.baseline is None:
+            raise HTTPException(400, f"{job_id} has no baseline configuration.")
+        baseline = core.config_key(spec.session_id, spec.baseline, spec.hardware_label)
+        return [
+            core.validity(
+                spec.session_id,
+                core.config_key(spec.session_id, item.configuration, spec.hardware_label),
+                baseline,
+                item.dataset,
+            )
+            for item in spec.items
+            if item.configuration != spec.baseline
+        ]
+
+    @app.post("/api/sessions/{session_id}/log/{entry_id}/evaluate")
+    def evaluate_prediction(session_id: str, entry_id: str) -> Evaluation:
+        core.session(session_id)
+        entry = next((e for e in core.sessions.log(session_id) if e.id == entry_id), None)
+        if entry is None:
+            raise HTTPException(404, f"No log entry {entry_id}.")
+        if entry.prediction is None:
+            raise HTTPException(400, f"{entry_id} has no structured prediction.")
+        return evaluate(entry.prediction, core.runs(session_id), core.analysis_settings)
+
+    @app.post("/api/sessions/{session_id}/suggestions", status_code=201)
+    async def start_suggestions(session_id: str, start: SuggestionStart) -> SuggestionRecord:
+        core.session(session_id)
+        if start.suggester not in core.suggesters:
+            raise HTTPException(400, f"No suggester {start.suggester}.")
+        current = core.analysis(session_id)
+        alternatives = runnable_alternatives(
+            core.registry, {core.hardware.label: core.hardware.capabilities}
         )
-        return summarise(rows, current.config, core.registry)
+        request = SuggestionRequest(
+            analysis=current,
+            observations=observe(current, core.registry),
+            alternatives=alternatives,
+            history=core.sessions.log(session_id),
+            limit=start.limit,
+        )
+        response = await core.suggesters[start.suggester].suggest(request)
+        record = SuggestionRecord(id=f"r-{new_job_id()[2:]}", created_at=now(), response=response)
+        folder = core.sessions.folder(session_id) / "suggestions"
+        folder.mkdir(exist_ok=True)
+        (folder / f"{record.id}.json").write_text(record.model_dump_json(indent=2))
+        return record
+
+    @app.get("/api/sessions/{session_id}/suggestions/{request_id}")
+    def suggestions(session_id: str, request_id: str) -> SuggestionRecord:
+        path = core.sessions.folder(session_id) / "suggestions" / f"{request_id}.json"
+        if not path.exists():
+            raise HTTPException(404, f"No suggestion request {request_id}.")
+        return SuggestionRecord.model_validate_json(path.read_text())
 
     @app.get("/api/sessions/{session_id}/environment")
     def environment(session_id: str) -> dict[str, dict]:

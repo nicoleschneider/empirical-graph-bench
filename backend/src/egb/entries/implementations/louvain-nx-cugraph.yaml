@@ -14,3 +14,4 @@ variants:
     driver: gaib-representation-test
     gaib_task: NX_LOUVAIN_GPU_CUDF
     script_task: louvain
+    cross_path_baseline: networkx-text

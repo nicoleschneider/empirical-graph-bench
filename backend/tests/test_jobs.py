@@ -8,7 +8,7 @@ from egb.hardware import Hardware, Specs
 from egb.jobs import JobRequest, configuration_statuses, resolve_session_job
 from egb.registry import Registry
 from egb.sessions import ConfigInput, ConfigurationInput, SessionCreate, SessionStore
-from egb.settings import BUILT_IN_ENTRIES, Settings
+from egb.settings import BUILT_IN_ANALYSIS, BUILT_IN_ENTRIES, Settings
 
 
 def hardware(capabilities: list[str]) -> Hardware:
@@ -45,6 +45,7 @@ def setup(tmp_path: Path, registry: Registry):
         lock_file=tmp_path / "lock.txt",
         entries=(BUILT_IN_ENTRIES,),
         poll_seconds=1.0,
+        analysis_config=BUILT_IN_ANALYSIS,
     )
     datasets = DatasetStore(settings.datasets_dir)
     email = registry.datasets["email-Eu-core"]

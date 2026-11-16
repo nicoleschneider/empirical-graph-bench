@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from egb.datasets import sha256
+from egb.predictions import Prediction
 from egb.registry import Registry
 
 LOG_KINDS = Literal[
@@ -118,7 +119,7 @@ class LogEntryInput(BaseModel):
     text: str
     iteration: int = Field(ge=0)
     refers_to: list[str] = []
-    prediction: dict | None = None
+    prediction: Prediction | None = None
     source: str = "user"
     suggestion: dict | None = None
 

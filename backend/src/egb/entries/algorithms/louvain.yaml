@@ -2,6 +2,7 @@ id: louvain
 name: Louvain
 task: community-detection
 orientation: undirected
+precision_sensitive: false
 parameters:
   weight: null
   resolution: 1

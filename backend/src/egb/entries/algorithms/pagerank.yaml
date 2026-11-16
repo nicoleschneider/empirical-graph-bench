@@ -2,5 +2,6 @@ id: pagerank
 name: PageRank
 task: centrality
 orientation: dataset
+precision_sensitive: true
 parameters:
   alpha: 0.85

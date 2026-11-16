@@ -56,7 +56,7 @@ def test_duplicate_entry_rejected(tmp_path: Path) -> None:
 def test_unknown_reference_rejected(tmp_path: Path) -> None:
     (tmp_path / "algorithms").mkdir()
     (tmp_path / "algorithms" / "bfs.yaml").write_text(
-        "id: bfs\nname: BFS\ntask: traversal\norientation: dataset\nparameters: {}\n"
+        "id: bfs\nname: BFS\ntask: traversal\norientation: dataset\nprecision_sensitive: false\nparameters: {}\n"
     )
     with pytest.raises(ValueError, match="unknown task traversal"):
         load_registry([BUILT_IN_ENTRIES, tmp_path])

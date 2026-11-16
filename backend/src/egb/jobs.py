@@ -18,6 +18,7 @@ class JobRequest(BaseModel):
     datasets: list[str]
     kind: Literal["exploratory", "targeted"]
     hypothesis: str | None = None
+    baseline: str | None = None
     repetitions: int | None = Field(default=None, ge=1)
     base_seed: int | None = None
 
@@ -44,6 +45,7 @@ class JobSpec(BaseModel):
     session_id: str | None
     kind: Literal["exploratory", "targeted", "download"]
     hypothesis: str | None
+    baseline: str | None = None
     hardware_label: str
     repetitions: int | None
     base_seed: int | None
@@ -230,6 +232,8 @@ def resolve_session_job(
         f"{c} is not a candidate configuration." for c in request.configurations if c not in known
     ]
     errors += [f"{d} is not in the workload." for d in request.datasets if d not in config.datasets]
+    if request.baseline is not None and request.baseline not in known:
+        errors.append(f"Baseline {request.baseline} is not a candidate configuration.")
     if request.kind == "targeted":
         errors += hypothesis_errors(request.hypothesis, log)
     if errors:
@@ -319,6 +323,7 @@ def resolve_session_job(
         session_id=session.meta.id,
         kind=request.kind,
         hypothesis=request.hypothesis,
+        baseline=request.baseline,
         hardware_label=hardware.label,
         repetitions=repetitions,
         base_seed=base_seed,

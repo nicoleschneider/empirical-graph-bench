@@ -170,7 +170,7 @@ on the local machine, and if not, why ("Needs cuda. No NVIDIA GPU found.").
 | `implementation` | Algorithm, library, backend, hardware requirements, driver | `networkx`, `nx-cugraph` per algorithm |
 | `representation` | Loading path, in-memory structure, precision, where graph construction is timed | `networkx-text`, `cudf-float32`, `cudf-float64` |
 | `dataset` | Files, hashes, size, orientation, ground truth, source URL | the five SNAP graphs |
-| `metric` | Column or formula, unit, direction, aggregation, applicable tasks | see below |
+| `metric` | Columns (summed), unit, direction, applicable tasks, whether ground truth is needed | see below |
 | `runner` | Runner class and its settings schema (later) | `local`, later `ssh`, `slurm` |
 | `suggester` | Suggester class and its settings (later) | `rules`, later `agent` |
 
@@ -230,25 +230,18 @@ queue, so they never overlap a timed run.
 
 Metrics:
 
-| Metric | Source | Unit | Better | Applies to |
-|---|---|---|---|---|
-| `etl_s` | column | s | lower | all |
-| `processing_s` | column | s | lower | all |
-| `end_to_end_s` | `etl_s + processing_s` | s | lower | all |
-| `etl_share` | `etl_s / end_to_end_s` | % | none | all |
-| `speedup` | ratio of medians, bootstrap 95% interval | × | higher | all, against a baseline |
-| `modularity` | column | none | higher | community-detection |
-| `nmi` | column, needs ground truth | none | higher | community-detection |
-| `predicted_communities` | column | count | none | community-detection |
-| `nmi_between_paths` | `cross_path_louvain.csv` | none | higher | validity check |
-| `pagerank_l1` | column, against the reference | none | lower | centrality |
-| `pagerank_top100` | column | fraction | higher | centrality |
-| `l1_vs_original_path` | `cross_path_l1.csv` | none | lower | validity check |
-| `unaccounted_s` | sleep check | s | lower | run validity |
+The registry holds the eight per-run metrics: `etl_s`, `processing_s`,
+`end_to_end_s` (`etl_s + processing_s`), `modularity`,
+`predicted_communities`, `nmi` (needs ground truth), `pagerank_l1` and
+`pagerank_top100` (against the reference). The analysis adds `etl_share`,
+speedups with intervals, and the validity measures (L1 between score
+vectors, identical partitions, NMI between partitions, modularity
+difference); see section 5.
 
-Metric formulas the notebook defines (end-to-end, ETL share, ratio of
-medians, sleep check) are ported into `egb.metrics`, with tests that
-reproduce the notebook's numbers from the committed results.
+The notebook's formulas for end-to-end time, ETL share and the ratio of
+medians are ported into `egb/analysis.py`. Tests reproduce the paper's
+medians and its 0.85 to 1.11 interval from the committed results. The
+notebook's sleep check is not ported yet.
 
 Hardware:
 
@@ -329,65 +322,151 @@ folder back. The Slurm variant submits them with `sbatch`, as
 completion. Neither needs a UI change: the UI shows jobs, events and
 results the same way.
 
-## 5. Hypothesis suggester interface
+## 5. Analysis and hypothesis suggestions
+
+### Analysis (`egb/analysis.py`)
+
+Rows in the paper's schema become runs keyed by a configuration key,
+`hardware/implementation/representation`, found from each row's `hardware`
+and gaib `task` through the registry. Keys, not session ids, are what
+analysis, predictions and validity checks use, so results from several
+machines can sit side by side later.
+
+- **Summary** per configuration and dataset: run count; median, min and
+  max of `etl_s`, `processing_s` and end-to-end time; median ETL share
+  (median over runs of `etl_s / end_to_end_s`, as in the notebook);
+  median, min and max of each effectiveness column present.
+- **Bottleneck** per configuration and dataset: the dominant phase and its
+  share, with the fastest configuration for the same task and dataset.
+- **Differences** between configurations of the same task on the same
+  dataset: `faster_processing_slower_end_to_end`, and
+  `faster_with_different_effectiveness` (modularity or NMI more than 0.01
+  apart, top-100 overlap more than 0.01 apart, L1 more than 1e-6 apart, or
+  community counts more than 25% apart).
+- **Crossovers**: tasks whose fastest configuration changes with dataset,
+  ordered by edge count.
+- **Comparisons**: speedup of each configuration against a baseline, as a
+  ratio of medians with a bootstrap 95% interval. The bootstrap is the
+  notebook's `ratio_of_medians`, with the same sampling order, so it
+  reproduces the notebook's intervals.
+
+Thresholds and bootstrap settings live in `egb/analysis.yaml`
+(`--analysis-config` to override): 10,000 resamples, seed 123.
+
+### Validity checks (`egb/validity.py`)
+
+A targeted configuration is checked against a baseline on one dataset.
+
+- Score outputs: L1 distance between the two score vectors, expected at
+  most 1e-14.
+- Partitions: identical or not, NMI between them (expected at least 0.99),
+  and modularity difference (expected within 0.01).
+- Side effects: every factor that differs besides the intended one:
+  hardware, algorithm, backend, loading path (with "compare end-to-end, not
+  processing"), and precision when the algorithm is precision-sensitive
+  (`precision_sensitive` on the algorithm entry; PageRank yes, unweighted
+  Louvain and label propagation no).
+
+Sources, in order:
+
+1. gaib's cross-path CSVs, when the targeted variant's
+   `cross_path_baseline` is the baseline's representation on the same
+   implementation and hardware. `representation_test.py` computes these in
+   the same process as the run.
+2. Saved outputs. After each `runner.py` invocation, the LocalRunner copies
+   the run-0 result of every definition from gaib's `cache/` folder into
+   `jobs/<job_id>/outputs/`, with an index. Comparing two saved outputs runs
+   `egb/compare_outputs.py` in the benchmark environment, using gaib's
+   `Evaluator` for L1 and NMI. Only run 0 is kept, so both configurations
+   need the same base seed.
+3. Otherwise the result says no outputs exist for a common seed.
+
+Validity checks are refused with 409 while a job runs, because they load
+outputs and compute NMI.
+
+### Prediction evaluation (`egb/predictions.py`)
+
+A structured prediction is:
+
+```json
+{"metric": "end_to_end_s",
+ "subject": {"hardware": "nexus-2080ti-gpu", "implementation": "louvain-nx-cugraph", "representation": "cudf-float32"},
+ "relation": "<",
+ "reference": {"hardware": "macbook-m5max-48gb", "implementation": "louvain-networkx", "representation": "networkx-text"},
+ "datasets": ["email-Eu-core"]}
+```
+
+`reference` (a configuration) or `threshold` (a number), not both. Metrics:
+the three phases, `etl_share`, and the effectiveness columns. For each
+dataset the evaluator forms the ratio of medians, predicted larger over
+predicted smaller, with a bootstrap 95% interval:
+
+| Interval | Status | Symbol |
+|---|---|---|
+| Above 1 | held | ✓ |
+| Below 1 | refuted | ✗ |
+| Includes 1 | narrow | ≈ |
+| Missing runs | pending | · |
+
+The prediction's status is refuted if any dataset is refuted, then pending,
+then narrow, otherwise held. On the paper's data, the second hypothesis
+(GPU cudf Louvain below the Mac on email-Eu-core) evaluates to narrow with
+interval 0.85 to 1.11, the paper's statistical tie.
+
+### Suggester interface (`egb/suggesters.py`)
 
 ```python
 class HypothesisSuggester(Protocol):
     id: str
 
-    async def suggest(self, request: SuggestionRequest) -> list[Suggestion]: ...
+    async def suggest(self, request: SuggestionRequest) -> SuggestionResponse: ...
 ```
 
 `SuggestionRequest`:
 
-- `observations`: computed facts, each with an id, kind, configurations,
-  datasets, metric, value, unit and interval, and a one-line statement
-  ("ETL: 87% of GPU time on web-Stanford").
-- `alternatives`: registry entries compatible with the available hardware,
-  so suggestions only propose runnable changes. On a CPU-only machine,
-  representation swaps to cudf are not offered.
-- `history`: the session's log, so a suggester does not repeat a tested
-  hypothesis.
+- `analysis`: the structured analysis above.
+- `observations`: the same facts as statements with ids
+  ("ETL: 87% of end-to-end time. nexus-2080ti-gpu PageRank, NetworkX
+  loading, web-Stanford."), for suggesters that read text.
+- `alternatives`: configuration keys runnable on the available hardware.
+  The API passes the local machine's; already measured ones are skipped.
+- `history`: the session's log. A suggestion whose `key` appears in a
+  recorded entry's `suggestion` is not offered again.
 - `limit`.
 
-`Suggestion`:
-
-- `rank`, `score`, `source` (`rules:<rule id>` or `agent:<model>`)
-- `hypothesis`: one sentence
-- `observation_ids`: what it rests on
-- `change`: the configuration change to run, as registry ids (from and to)
-- `predictions`: one or more drafts, each with a sentence and a structured
-  form the app can evaluate:
-  `{metric, statistic, subject, relation, reference, datasets, tolerance}`
-- `validity_checks`: drafts in the same form, for checks that only the
-  intended factor changed
-- `caveats`: known confounds, such as a precision change
+`SuggestionResponse`: `suggester`, `status` (`complete` or `unavailable`),
+`message`, and ranked `suggestions`. Each `Suggestion` has a stable `key`,
+`rank`, `score`, `source`, `rule`, a one-sentence `hypothesis`,
+`observation_ids`, a `change` (`representation`, `algorithm`, `hardware`,
+`datasets` or `validity`, with source and target keys), prediction drafts
+(sentence plus structured prediction), validity check drafts, and caveats.
 
 Predictions are drafts until recorded. The practitioner edits the sentence
 and the structured fields, then records it. After that the entry is
 immutable; changes are new `revision` or `amendment` entries.
 
-**Rule-based suggester (now).** Each rule is a registry entry with a
-condition over observations and a template for the suggestion. The first
-rules generalize the paper's three hypotheses. Unit tests feed each rule
-hand-written observations shaped like the paper's and check the suggestion.
-On a CPU-only machine only `processing-dominates` can fire, because the
-others need a cudf representation:
+**RuleSuggester (now).** Four rules. Each pre-fills predictions with
+medians from the data.
 
-| Rule | Condition | Suggested change |
-|---|---|---|
-| `loading-dominates` | ETL share of the slower configuration ≥ 50% and an alternative representation exists for its implementation | Swap the representation, predict end-to-end below the faster configuration's median |
-| `size-crossover` | The faster configuration changes with dataset size | Same swap on the losing configuration, predict it wins on the smallest dataset |
-| `processing-dominates` | Processing share ≥ 90% and another algorithm exists for the task | Swap the algorithm, predict end-to-end time and a quality drop |
-| `precision-change` | A suggested change alters precision | Adds a caveat and a tolerance validity check |
+| Rule | Fires when | Suggests | Pre-filled prediction |
+|---|---|---|---|
+| `etl-dominates` | ETL share ≥ 50% on datasets where the configuration is not fastest, and another representation of its implementation is runnable | Representation change, preferring the same precision | End-to-end below the fastest configuration's medians on those datasets; L1 or partition validity checks |
+| `processing-dominates` | Processing share ≥ 90% on datasets where it is not fastest | Algorithm change on the same hardware, or hardware change to an accelerated implementation of the same algorithm and representation | End-to-end below the fastest medians; for algorithm changes, quality below the current medians |
+| `different-effectiveness` | A faster configuration's effectiveness differs | Validity check against the slower one | The difference persists, in its observed direction |
+| `dataset-dependent` | The fastest configuration changes with dataset | Datasets between the crossover sizes | The larger-graph winner wins on them; if none is registered, a note to add one |
 
-Ranking: size of the gap the change could close, then estimated runtime
-from earlier runs.
+Ranking: largest end-to-end gap the change could close (slower median over
+fastest median), then key. On the paper's initial exploration (Mac, Xeon and
+GPU with NetworkX loading, five datasets) it suggests, in order: label
+propagation on the Xeon and on the Mac, cudf float64 loading for GPU
+PageRank ("end-to-end time below ... 4.87 s on web-Stanford ..."), validity
+checks for GPU Louvain's different community counts, cudf loading for GPU
+Louvain on email-Eu-core, and broader datasets between 16,706 and 147,892
+edges.
 
-**Agent suggester (later).** Same interface, same output type, called by
-the same endpoint. Suggestion requests are asynchronous from the start, so a
-slow suggester needs no UI change. The prompt files live in
-`backend/prompts/`.
+**AgentSuggester (later).** Same interface. It now returns `unavailable`
+with the message "Agent suggestions are not available yet. Use the
+rule-based suggester." Prompt files will live in `backend/prompts/`.
 
 ## 6. Session storage
 
@@ -405,8 +484,9 @@ sessions/<session_id>/
   jobs.jsonl              append-only job records and status changes
   environment/
     <snapshot_hash>.json  one file per distinct environment
+  suggestions/<request_id>.json  each suggestion request and its response
   jobs/<job_id>/
-    spec.json             resolved JobSpec
+    spec.json             resolved JobSpec, with the baseline for targeted jobs
     command.jsonl         one line per invocation: argv, working directory, extra environment variables
     environment.json      this job's environment snapshot
     definitions/*.json    gaib definitions, for gaib-runner jobs
@@ -414,6 +494,7 @@ sessions/<session_id>/
     cross_path_l1.csv     representation-test PageRank jobs
     cross_path_louvain.csv  representation-test Louvain jobs
     reports/*.json        gaib's per-run JSON reports
+    outputs/              run-0 partitions or scores per definition, with index.json
     stdout.log
     work/                 gaib's working directory, deleted on success
 ```
@@ -530,7 +611,7 @@ Jobs:
 
 | Method | Path | Purpose | Built |
 |---|---|---|---|
-| POST | `/sessions/{sid}/jobs` | Queue configurations × datasets; targeted jobs name a hypothesis | yes |
+| POST | `/sessions/{sid}/jobs` | Queue configurations × datasets; targeted jobs name a hypothesis and optionally a baseline | yes |
 | GET | `/sessions/{sid}/jobs` | Jobs with status | yes |
 | GET | `/jobs/{jid}` | One job: spec, status, events | yes |
 | GET | `/jobs/{jid}/events` | Server-sent events stream | yes |
@@ -541,11 +622,13 @@ Results and analysis:
 | Method | Path | Purpose | Built |
 |---|---|---|---|
 | GET | `/sessions/{sid}/results` | Rows joined with configuration ids | yes |
-| GET | `/sessions/{sid}/summary` | Medians and ranges per configuration and dataset | yes |
+| GET | `/sessions/{sid}/summary` | Phase medians and ranges, ETL share, effectiveness per configuration and dataset | yes |
 | GET | `/sessions/{sid}/environment` | Snapshots used in the session | yes |
-| GET | `/sessions/{sid}/comparisons` | Speedups with intervals, given baseline and measure | later |
-| GET | `/sessions/{sid}/validity` | Sleep check, cross-path checks, determinism | later |
-| GET | `/sessions/{sid}/observations` | Computed observations | later |
+| GET | `/sessions/{sid}/comparisons?baseline=&measure=` | Speedups with intervals against a baseline key | yes |
+| GET | `/sessions/{sid}/validity?targeted=&baseline=&dataset=` | Validity of one configuration against another | yes |
+| GET | `/jobs/{jid}/validity` | Validity of a targeted job against its baseline | yes |
+| GET | `/sessions/{sid}/analysis` | Summaries, bottlenecks, differences, crossovers | yes |
+| GET | `/sessions/{sid}/observations` | Observations as statements | yes |
 
 Hypotheses:
 
@@ -554,9 +637,9 @@ Hypotheses:
 | GET | `/sessions/{sid}/log` | All entries | yes |
 | POST | `/sessions/{sid}/log` | Append an entry | yes |
 | GET | `/sessions/{sid}/log/verify` | Recompute the chain and check recorded files | yes |
-| POST | `/sessions/{sid}/suggestions` | Start a suggestion request; returns its id | later |
-| GET | `/sessions/{sid}/suggestions/{rid}` | Status and ranked suggestions | later |
-| POST | `/sessions/{sid}/log/{eid}/evaluate` | Compute outcome status for a prediction from results | later |
+| POST | `/sessions/{sid}/suggestions` | Run a suggester (`rules` or `agent`); stores and returns the response | yes |
+| GET | `/sessions/{sid}/suggestions/{rid}` | A stored suggestion response | yes |
+| POST | `/sessions/{sid}/log/{eid}/evaluate` | Evaluate a recorded structured prediction | yes |
 | GET | `/sessions/{sid}/log/table` | The log as a LaTeX table, like `hypotheses.tex` | later |
 
 ## 8. Run scheduling
@@ -578,7 +661,8 @@ Runs execute one at a time, so they do not distort each other's timings.
   behind the running job unless the suggester is remote.
 - The frontend receives progress over server-sent events, not by polling.
 - The environment snapshot records that the app's own processes were
-  running. The sleep check flags runs whose gaps suggest interference.
+  running. A port of the notebook's sleep check, to flag runs whose gaps
+  suggest interference, is still to come.
 
 ## 9. Workflow steps
 

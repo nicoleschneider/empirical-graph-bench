@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -23,6 +24,7 @@ from egb.settings import Settings
 PROBE = Path(__file__).with_name("probe.py")
 STATUS_EVENTS = {"queued", "started", "finished", "failed", "cancelled"}
 TAIL_LINES = 20
+CACHE_STAMP = re.compile(r"_(\d{4}-\d{2}-\d{2}T[\d.-]+)\.txt$")
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,57 @@ def log_tail(path: Path) -> list[str]:
     if not path.exists():
         return []
     return path.read_text(errors="replace").splitlines()[-TAIL_LINES:]
+
+
+def cache_stamp(path: Path) -> str:
+    return CACHE_STAMP.search(path.name).group(1)
+
+
+def keep_first_outputs(
+    handle: JobHandle, results: Path, rows_before: int, files: list[Path]
+) -> None:
+    rows = read_rows(results)[rows_before:]
+    if len(files) != len(rows):
+        logger.warning(
+            "Job %s: %d gaib cache files for %d runs; outputs not kept",
+            handle.spec.id,
+            len(files),
+            len(rows),
+        )
+        return
+    items = {(i.gaib_task, i.results_dataset): i for i in handle.spec.items}
+    folder = handle.job_dir / "outputs"
+    index_path = folder / "index.json"
+    folder.mkdir(exist_ok=True)
+    index = json.loads(index_path.read_text()) if index_path.exists() else []
+    for path, row in zip(files, rows):
+        if path.name[: CACHE_STAMP.search(path.name).start()] != row["task"]:
+            logger.warning(
+                "Job %s: cache file %s does not match task %s; outputs not kept",
+                handle.spec.id,
+                path.name,
+                row["task"],
+            )
+            return
+    for path, row in zip(files, rows):
+        if row["run_index"] != "0":
+            continue
+        item = items[(row["task"], row["dataset"])]
+        target = folder / f"{row['task']}_{row['dataset']}_seed{row['seed']}.txt"
+        shutil.copyfile(path, target)
+        index.append(
+            {
+                "config": {
+                    "hardware": row["hardware"],
+                    "implementation": item.implementation,
+                    "representation": item.representation,
+                },
+                "dataset": item.dataset,
+                "seed": int(row["seed"]),
+                "path": str(target),
+            }
+        )
+    index_path.write_text(json.dumps(index, indent=2))
 
 
 class LocalRunner:
@@ -190,6 +243,9 @@ class LocalRunner:
             f.write(invocation.model_dump_json() + "\n")
         results = Path(invocation.results_csv) if invocation.results_csv else None
         seen = len(read_rows(results)) if results else 0
+        rows_before = seen
+        cache = Path(invocation.cwd) / "cache"
+        cache_before = set(cache.glob("*.txt"))
         with (handle.job_dir / "stdout.log").open("ab") as log:
             handle.process = await asyncio.create_subprocess_exec(
                 *invocation.argv,
@@ -208,6 +264,13 @@ class LocalRunner:
                     pass
                 if results:
                     seen = await self.report_rows(handle, results, seen)
+        if handle.process.returncode == 0 and invocation.driver == "gaib-runner":
+            keep_first_outputs(
+                handle,
+                results,
+                rows_before,
+                sorted(set(cache.glob("*.txt")) - cache_before, key=cache_stamp),
+            )
         return handle.process.returncode
 
     async def report_rows(self, handle: JobHandle, results: Path, seen: int) -> int:

@@ -19,6 +19,7 @@ class Task(Entry):
 class Algorithm(Entry):
     task: str
     orientation: Literal["undirected", "dataset"]
+    precision_sensitive: bool
     parameters: dict[str, float | int | str | None]
 
 
@@ -31,6 +32,7 @@ class Variant(BaseModel):
     definition_task: str | None = None
     gpu: bool = False
     script_task: Literal["louvain", "pagerank"] | None = None
+    cross_path_baseline: str | None = None
 
 
 class Implementation(Entry):

@@ -1,27 +1,10 @@
-import statistics
+import json
 from pathlib import Path
-
-from pydantic import BaseModel
 
 from egb.jobs import JobSpec
 from egb.registry import Registry
 from egb.runners import read_rows
-from egb.sessions import SessionConfig
-
-
-class MetricSummary(BaseModel):
-    unit: str
-    median: float
-    min: float
-    max: float
-    runs: int
-
-
-class SummaryRow(BaseModel):
-    configuration: str
-    dataset: str
-    runs: int
-    metrics: dict[str, MetricSummary]
+from egb.validity import CrossPath, SavedOutput, read_cross_paths
 
 
 def coerce(value: str) -> int | float | str | None:
@@ -58,38 +41,18 @@ def session_rows(session_dir: Path, statuses: dict[str, str]) -> list[dict]:
     return rows
 
 
-def metric_value(row: dict, columns: list[str]) -> float | None:
-    values = [row.get(column) for column in columns]
-    if any(not isinstance(v, (int, float)) for v in values):
-        return None
-    return float(sum(values))
+def saved_outputs(session_dir: Path) -> list[SavedOutput]:
+    return [
+        SavedOutput.model_validate(record)
+        for path in sorted(session_dir.glob("jobs/*/outputs/index.json"))
+        for record in json.loads(path.read_text())
+    ]
 
 
-def summarise(rows: list[dict], config: SessionConfig, registry: Registry) -> list[SummaryRow]:
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for row in rows:
-        if row["configuration"] is not None:
-            groups.setdefault((row["configuration"], row["dataset_id"]), []).append(row)
-    summary = []
-    for (configuration, dataset), group in sorted(groups.items()):
-        task = registry.task_of(config.candidate(configuration).implementation).id
-        metrics = {}
-        for metric_id in config.metrics:
-            metric = registry.metrics[metric_id]
-            if task not in metric.tasks:
-                continue
-            values = [v for v in (metric_value(r, metric.columns) for r in group) if v is not None]
-            if values:
-                metrics[metric_id] = MetricSummary(
-                    unit=metric.unit,
-                    median=statistics.median(values),
-                    min=min(values),
-                    max=max(values),
-                    runs=len(values),
-                )
-        summary.append(
-            SummaryRow(
-                configuration=configuration, dataset=dataset, runs=len(group), metrics=metrics
-            )
-        )
-    return summary
+def cross_paths(session_dir: Path, registry: Registry) -> list[CrossPath]:
+    datasets = {d.results_name: d.id for d in registry.datasets.values()}
+    return [
+        record
+        for path in sorted(session_dir.glob("jobs/*/cross_path_*.csv"))
+        for record in read_cross_paths(path, datasets)
+    ]
